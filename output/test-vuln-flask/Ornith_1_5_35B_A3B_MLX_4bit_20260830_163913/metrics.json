@@ -1,0 +1,25 @@
+{
+  "repo": "test-vuln-flask",
+  "model": "omlx/Ornith-1.5-35B-A3B-MLX-4bit",
+  "label": "Ornith_1_5_35B_A3B_MLX_4bit",
+  "wall_seconds": 178.72793045802973,
+  "exit_code": 0,
+  "timed_out": false,
+  "tools_detected": [
+    "graphify",
+    "semgrep",
+    "serena",
+    "leakferret",
+    "osv-scanner"
+  ],
+  "graphify_ran": true,
+  "assessment_exists": false,
+  "assessment_lines": 0,
+  "total_findings": 0,
+  "findings_by_severity": {},
+  "sections_found": [],
+  "sections_missing": [],
+  "critic_completed": false,
+  "verifier_completed": false,
+  "is_complete": false
+}

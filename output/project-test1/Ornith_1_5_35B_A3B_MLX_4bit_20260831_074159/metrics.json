@@ -1,0 +1,42 @@
+{
+  "repo": "project-test1",
+  "model": "omlx/Ornith-1.5-35B-A3B-MLX-4bit",
+  "label": "Ornith_1_5_35B_A3B_MLX_4bit",
+  "wall_seconds": 735.3447371670045,
+  "exit_code": 0,
+  "timed_out": false,
+  "tools_detected": [
+    "graphify",
+    "semgrep",
+    "serena",
+    "leakferret",
+    "osv-scanner",
+    "syft",
+    "grype"
+  ],
+  "graphify_ran": true,
+  "sbom_generated": true,
+  "grype_ran": true,
+  "diff_ref": null,
+  "assessment_exists": true,
+  "assessment_lines": 182,
+  "total_findings": 1,
+  "findings_by_severity": {
+    "LOW": 1
+  },
+  "sections_found": [
+    "Security Assessment",
+    "Context",
+    "Scope",
+    "Attack Surface",
+    "Source Inventory",
+    "Findings",
+    "Dependencies",
+    "Summary",
+    "Validation"
+  ],
+  "sections_missing": [],
+  "critic_completed": true,
+  "verifier_completed": true,
+  "is_complete": true
+}

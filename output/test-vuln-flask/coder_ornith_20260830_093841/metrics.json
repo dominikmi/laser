@@ -1,0 +1,37 @@
+{
+  "repo": "test-vuln-flask",
+  "model": "galileo/coder-ornith:LATEST",
+  "label": "coder_ornith",
+  "wall_seconds": 2700.030467250035,
+  "exit_code": -9,
+  "timed_out": true,
+  "tools_detected": [
+    "graphify",
+    "semgrep",
+    "serena",
+    "leakferret",
+    "osv-scanner"
+  ],
+  "graphify_ran": true,
+  "assessment_exists": true,
+  "assessment_lines": 360,
+  "total_findings": 0,
+  "findings_by_severity": {},
+  "sections_found": [
+    "Attack Surface",
+    "Findings",
+    "Summary"
+  ],
+  "sections_missing": [
+    "Security Assessment",
+    "Scope",
+    "Source Inventory",
+    "Dependencies",
+    "Critic",
+    "Verifier",
+    "Validation"
+  ],
+  "critic_completed": false,
+  "verifier_completed": false,
+  "is_complete": false
+}

@@ -1,0 +1,42 @@
+{
+  "repo": "test-vuln-flask",
+  "model": "omlx/Ornith-1.5-35B-A3B-MLX-4bit",
+  "label": "Ornith_1_5_35B_A3B_MLX_4bit",
+  "wall_seconds": 13102.787325332989,
+  "exit_code": 0,
+  "timed_out": false,
+  "tools_detected": [
+    "graphify",
+    "semgrep",
+    "serena",
+    "leakferret",
+    "osv-scanner"
+  ],
+  "graphify_ran": true,
+  "assessment_exists": true,
+  "assessment_lines": 418,
+  "total_findings": 13,
+  "findings_by_severity": {
+    "CRITICAL": 3,
+    "HIGH": 4,
+    "LOW": 1,
+    "MODERATE": 5
+  },
+  "sections_found": [
+    "Security Assessment",
+    "Attack Surface",
+    "Source Inventory",
+    "Findings",
+    "Dependencies",
+    "Summary",
+    "Validation"
+  ],
+  "sections_missing": [
+    "Scope",
+    "Critic",
+    "Verifier"
+  ],
+  "critic_completed": false,
+  "verifier_completed": false,
+  "is_complete": false
+}

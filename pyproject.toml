@@ -1,0 +1,24 @@
+[project]
+name = "sast-review"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "Dominik Miklaszewski", email = "dominikmi@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic>=2.13.5",
+]
+
+[project.scripts]
+sast-review = "sast_review:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "ruff>=0.16.5",
+]

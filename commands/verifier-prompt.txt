@@ -1,0 +1,13 @@
+Read `.opencode/commands/security-review-ref.md` for the finding format
+spec, then verify the SEC_ASSESSMENT file in `.security-output/`.
+Verify max 15 findings — prioritize CRITICAL and HIGH severity first.
+For each finding:
+1. Read the file at the cited path. Confirm it exists.
+2. Confirm line numbers match the code snippet.
+3. Confirm code snippet is verbatim (not hallucinated).
+4. For multi-hop traces: read Source and Sink files. Confirm data flows.
+   Skip intermediate hops if context is tight.
+5. For deps: confirm package version matches.
+
+For each discrepancy: one line — finding title, what is wrong, actual
+value. Do NOT add observations, praise, suggestions, or explanations.

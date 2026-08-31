@@ -1,0 +1,18 @@
+Read `.opencode/commands/security-review-ref.md` for the classification
+definitions, then review the SEC_ASSESSMENT file in `.security-output/`.
+For each finding: read the source file at the path cited in the finding.
+Read max 15 source files total — prioritize CRITICAL and HIGH findings.
+
+Check for:
+1. False positives — read source to confirm exploitability
+2. Missed vulns — entry points in Attack Surface with no finding
+3. Incorrect Impact or Likelihood ratings per the ref file definitions
+4. Wrong CWE classifications
+5. Hand-waved data flow traces (must cite file:line at every hop)
+6. Reachability misclassification — check imports and call sites
+7. Confidence inflation — CONFIRMED requires complete verified trace
+8. Dependency findings where vulnerable function is not actually called
+
+For each issue: one line — finding title, what is wrong, correct
+classification. Do NOT add general observations, praise, suggestions,
+or explanations. Only list issues.

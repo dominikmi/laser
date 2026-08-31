@@ -1,0 +1,35 @@
+timestamp=2026-08-30T16:39:13.911Z level=INFO run=e44dd7c5 message="creating instance" directory=/Users/mikey/HomeWorks/OpenCode-tests/test-vuln-flask
+timestamp=2026-08-30T16:39:13.912Z level=INFO run=e44dd7c5 message=fromDirectory directory=/Users/mikey/HomeWorks/OpenCode-tests/test-vuln-flask
+timestamp=2026-08-30T16:39:13.963Z level=INFO run=e44dd7c5 message=bootstrapping directory=/Users/mikey/HomeWorks/OpenCode-tests/test-vuln-flask
+timestamp=2026-08-30T16:39:13.966Z level=INFO run=e44dd7c5 message=loading path=/Users/mikey/.config/opencode/config.json
+timestamp=2026-08-30T16:39:13.966Z level=INFO run=e44dd7c5 message=loading path=/Users/mikey/.config/opencode/opencode.json
+timestamp=2026-08-30T16:39:13.972Z level=INFO run=e44dd7c5 message=loading path=/Users/mikey/.config/opencode/opencode.jsonc
+timestamp=2026-08-30T16:39:13.982Z level=INFO run=e44dd7c5 message=loading path=/Users/mikey/HomeWorks/OpenCode-tests/test-vuln-flask/.opencode/opencode.json
+timestamp=2026-08-30T16:39:13.982Z level=INFO run=e44dd7c5 message=loading path=/Users/mikey/HomeWorks/OpenCode-tests/test-vuln-flask/.opencode/opencode.jsonc
+timestamp=2026-08-30T16:39:15.657Z level=INFO run=e44dd7c5 message="all LSPs are disabled"
+timestamp=2026-08-30T16:39:15.657Z level=INFO run=e44dd7c5 message="all formatters are disabled"
+timestamp=2026-08-30T16:39:15.657Z level=INFO run=e44dd7c5 message=init
+timestamp=2026-08-30T16:39:15.699Z level=INFO run=e44dd7c5 message=created id=ses_fac75e20cffe2J9mHz7gOls80A slug=clever-meadow version=1.18.25 projectID=e7b3840943718d3f4a0d144aaeb8867914b348c8 directory=/Users/mikey/HomeWorks/OpenCode-tests/test-vuln-flask path="" workspaceID=undefined parentID=undefined title="New session - 2026-08-30T16:39:15.699Z" agent=undefined model=undefined metadata=undefined permission="[{\"permission\":\"question\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"plan_enter\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"plan_exit\",\"pattern\":\"*\",\"action\":\"deny\"}]" cost=0 tokens.input=0 tokens.output=0 tokens.reasoning=0 tokens.cache.read=0 tokens.cache.write=0 time.created=1788107955699 time.updated=1788107955699
+timestamp=2026-08-30T16:39:15.706Z level=INFO run=e44dd7c5 message="event connected"
+timestamp=2026-08-30T16:39:15.708Z level=INFO run=e44dd7c5 message=command session.id=ses_fac75e20cffe2J9mHz7gOls80A command=security-review agent=undefined
+timestamp=2026-08-30T16:39:17.962Z level=WARN run=e44dd7c5 message="duplicate skill name" name=graphify existing=/Users/mikey/.claude/skills/graphify/SKILL.md duplicate=/Users/mikey/.config/opencode/skills/graphify/SKILL.md
+timestamp=2026-08-30T16:39:17.962Z level=INFO run=e44dd7c5 message=init count=4
+timestamp=2026-08-30T16:39:17.980Z level=INFO run=e44dd7c5 message=loop session.id=ses_fac75e20cffe2J9mHz7gOls80A step=0
+timestamp=2026-08-30T16:39:17.985Z level=INFO run=e44dd7c5 message=stream providerID=omlx modelID=Ornith-1.5-35B-A3B-MLX-4bit session.id=ses_fac75e20cffe2J9mHz7gOls80A small=true agent=title mode=primary
+timestamp=2026-08-30T16:39:17.988Z level=INFO run=e44dd7c5 message="llm runtime selected" llm.runtime=ai-sdk llm.provider=omlx llm.model=Ornith-1.5-35B-A3B-MLX-4bit
+timestamp=2026-08-30T16:39:18.044Z level=INFO run=e44dd7c5 message=tracking hash=1b89f4b4b581060fafe70492e6ed545cd4fb8178 cwd=/Users/mikey/HomeWorks/OpenCode-tests/test-vuln-flask git=/Users/mikey/.local/share/opencode/snapshot/e7b3840943718d3f4a0d144aaeb8867914b348c8/bd026ab8c26586da0626ab1759ba549d49ef1f60
+timestamp=2026-08-30T16:39:18.049Z level=INFO run=e44dd7c5 message="shell tool using shell" shell=/bin/zsh
+timestamp=2026-08-30T16:39:18.838Z level=INFO run=e44dd7c5 message="watcher backend" directory=/Users/mikey/HomeWorks/OpenCode-tests/test-vuln-flask platform=darwin backend=fs-events
+timestamp=2026-08-30T16:39:18.841Z level=INFO run=e44dd7c5 message="project copy refresh started" projectID=e7b3840943718d3f4a0d144aaeb8867914b348c8
+timestamp=2026-08-30T16:39:21.713Z level=INFO run=e44dd7c5 message="project copy refresh done" projectID=e7b3840943718d3f4a0d144aaeb8867914b348c8 updated=[] removed=[]
+timestamp=2026-08-30T16:39:21.989Z level=INFO run=e44dd7c5 message="booting location services" directory=/Users/mikey/HomeWorks/OpenCode-tests/test-vuln-flask workspaceID=undefined
+timestamp=2026-08-30T16:39:22.005Z level=INFO run=e44dd7c5 message=process session.id=ses_fac75e20cffe2J9mHz7gOls80A messageID=msg_0538a26de001qYzJawYZtehEM9
+timestamp=2026-08-30T16:39:22.007Z level=INFO run=e44dd7c5 message=stream providerID=omlx modelID=Ornith-1.5-35B-A3B-MLX-4bit session.id=ses_fac75e20cffe2J9mHz7gOls80A small=false agent=build mode=primary
+timestamp=2026-08-30T16:39:22.012Z level=INFO run=e44dd7c5 message="llm runtime selected" llm.runtime=ai-sdk llm.provider=omlx llm.model=Ornith-1.5-35B-A3B-MLX-4bit
+timestamp=2026-08-30T16:40:15.833Z level=INFO run=e44dd7c5 message=cleanup prune=7.days
+timestamp=2026-08-30T16:42:09.774Z level=INFO run=e44dd7c5 message=tracking hash=1b89f4b4b581060fafe70492e6ed545cd4fb8178 cwd=/Users/mikey/HomeWorks/OpenCode-tests/test-vuln-flask git=/Users/mikey/.local/share/opencode/snapshot/e7b3840943718d3f4a0d144aaeb8867914b348c8/bd026ab8c26586da0626ab1759ba549d49ef1f60
+timestamp=2026-08-30T16:42:09.811Z level=INFO run=e44dd7c5 message=loop session.id=ses_fac75e20cffe2J9mHz7gOls80A step=1
+timestamp=2026-08-30T16:42:09.812Z level=INFO run=e44dd7c5 message="exiting loop" session.id=ses_fac75e20cffe2J9mHz7gOls80A
+timestamp=2026-08-30T16:42:09.820Z level=INFO run=e44dd7c5 message="disposing instance" directory=/Users/mikey/HomeWorks/OpenCode-tests/test-vuln-flask
+timestamp=2026-08-30T16:42:09.939Z level=INFO run=e44dd7c5 message=loading path=/Users/mikey/HomeWorks/OpenCode-tests/test-vuln-flask/.opencode/opencode.json
+timestamp=2026-08-30T16:42:09.942Z level=INFO run=e44dd7c5 message=loading path=/Users/mikey/HomeWorks/OpenCode-tests/test-vuln-flask/.opencode/opencode.jsonc

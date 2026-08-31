@@ -43,16 +43,16 @@ tools and models can handle. And it works with local LLMs too! Tested with llama
 - Python 3.13+
 - [uv](https://docs.astral.sh/uv/) for dependency management
 - [OpenCode](https://opencode.ai) CLI (`opencode` on PATH), version 1.18+
-- A running LLM provider (Galileo, LM Studio, oMLX, or any OpenAI-compatible)
+- A running LLM provider (llama.cpp, LM Studio, oMLX, or any OpenAI-compatible)
 
 **Security tools (auto-detected, all optional — the review degrades gracefully
 when any of them is missing):**
 
 | Tool | Purpose | Install |
 |------|---------|---------|
-| [graphify](https://github.com/nicobailey/graphify) | Codebase knowledge graph | `uv tool install "graphifyy[openai]"` |
+| [graphify](https://github.com/Graphify-Labs/graphify) | Codebase knowledge graph | `uv tool install "graphifyy[openai]"` |
 | [Semgrep](https://semgrep.dev) | Deterministic SAST, 10k+ rules | `brew install semgrep` |
-| [Serena](https://github.com/JetBrains/serena) | LSP-powered semantic navigation | `uv tool install -p 3.13 serena-agent` |
+| [Serena](https://github.com/oraios/serena) | LSP-powered semantic navigation | `uv tool install -p 3.13 serena-agent` |
 | [TruffleHog](https://github.com/trufflesecurity/trufflehog) | Secret scanning with verification | `brew install trufflehog` |
 | [OSV-Scanner](https://google.github.io/osv-scanner/) | Dependency vulnerability scanning | `brew install osv-scanner` |
 | [syft](https://github.com/anchore/syft) | SBOM generation (CycloneDX) | `brew install syft` |

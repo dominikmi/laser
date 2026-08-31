@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Type checker / linter caches
+.mypy_cache/
+.ruff_cache/
+
+# Review output (collected results)
+output/
+
+# Runtime artifacts injected into target repos
+.security-output/
+graphify-out/
+
+# Serena LSP cache
+.serena/
+
+# OS junk
+.DS_Store

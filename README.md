@@ -12,6 +12,10 @@ There are no ground-truth files to maintain, no coupling to a specific
 benchmark suite. It works on any codebase, in any language that the underlying
 tools and models can handle. And it works with local LLMs too! Tested with llama.cpp on Linux AMD w/ Vulkan and oMLX on MacOS M3 Pro.
 
+> **See it in action:** [EXAMPLE_REPORT.md](EXAMPLE_REPORT.md) — a complete
+> security assessment of a deliberately vulnerable Flask application, produced
+> by LASER with Ornith-1.5-35B running on oMLX.
+
 ## Table of contents
 
 - [Prerequisites](#prerequisites)

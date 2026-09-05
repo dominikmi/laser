@@ -77,17 +77,64 @@ class InjectionManifest:
     created_dirs: list[Path] = field(default_factory=list)
 
 
-def _backup_and_copy(src: Path, dst: Path, manifest: InjectionManifest) -> None:
-    """Back up dst if it exists, then copy src to dst."""
+def _ensure_safe_directory(
+    target_repo: Path,
+    directory: Path,
+    manifest: InjectionManifest | None = None,
+) -> None:
+    root = target_repo.resolve(strict=True)
+    if directory.is_symlink():
+        raise ValueError(f"refusing symlinked injection directory: {directory}")
+    if directory.exists():
+        if not directory.is_dir() or not directory.resolve().is_relative_to(root):
+            raise ValueError(f"injection directory escapes target repository: {directory}")
+        return
+    parent = directory.parent.resolve()
+    if not parent.is_relative_to(root):
+        raise ValueError(f"injection directory escapes target repository: {directory}")
+    directory.mkdir()
+    if manifest is not None:
+        manifest.created_dirs.append(directory)
+
+
+def _reject_symlink(path: Path) -> None:
+    if path.is_symlink():
+        raise ValueError(f"refusing symlinked output file: {path}")
+
+
+def _track_backup(dst: Path, manifest: InjectionManifest) -> None:
+    if dst.is_symlink():
+        raise ValueError(f"refusing symlinked injection file: {dst}")
     if dst.exists():
         backup = dst.with_suffix(dst.suffix + _BACKUP_SUFFIX)
+        if backup.is_symlink():
+            raise ValueError(f"refusing symlinked injection backup: {backup}")
         shutil.copy2(dst, backup)
         manifest.backups[str(dst)] = backup
         logger.debug("Backed up %s -> %s", dst, backup)
     else:
         manifest.backups[str(dst)] = None
+
+
+def _backup_and_copy(src: Path, dst: Path, manifest: InjectionManifest) -> None:
+    """Back up dst if it exists, then copy src to dst."""
+    _track_backup(dst, manifest)
     shutil.copy2(src, dst)
     logger.info("Injected %s", dst)
+
+
+def inject_prior_knowledge(
+    target_repo: Path,
+    content: str,
+    manifest: InjectionManifest,
+) -> None:
+    """Temporarily inject bounded same-repository knowledge context."""
+    security_out = target_repo / ".security-output"
+    _ensure_safe_directory(target_repo, security_out, manifest)
+    destination = security_out / "PRIOR_KNOWLEDGE.md"
+    _track_backup(destination, manifest)
+    destination.write_text(content, encoding="utf-8")
+    logger.info("Injected prior knowledge context into %s", destination)
 
 
 def inject_commands(
@@ -109,10 +156,10 @@ def inject_commands(
         manifest: injection tracking manifest.
         file_cap: max files to scan in step 6, scaled to model context.
     """
-    commands_dir = target_repo / ".opencode" / "commands"
-    if not commands_dir.exists():
-        commands_dir.mkdir(parents=True, exist_ok=True)
-        manifest.created_dirs.append(commands_dir)
+    opencode_dir = target_repo / ".opencode"
+    _ensure_safe_directory(target_repo, opencode_dir, manifest)
+    commands_dir = opencode_dir / "commands"
+    _ensure_safe_directory(target_repo, commands_dir, manifest)
 
     for filename in ("security-review.md", "security-review-ref.md"):
         src = runner_dir / "commands" / filename
@@ -130,13 +177,12 @@ def inject_commands(
     # Inject subagent prompt files into .security-output/ so the model
     # reads them at steps 11/12 — fresh in context when needed.
     security_out = target_repo / ".security-output"
-    security_out.mkdir(parents=True, exist_ok=True)
+    _ensure_safe_directory(target_repo, security_out, manifest)
     for prompt_file in ("critic-prompt.txt", "verifier-prompt.txt"):
         src = runner_dir / "commands" / prompt_file
         if src.exists():
             dst = security_out / prompt_file
-            shutil.copy2(src, dst)
-            logger.info("Injected subagent prompt %s", dst)
+            _backup_and_copy(src, dst, manifest)
 
 
 def inject_permissions(
@@ -146,17 +192,14 @@ def inject_permissions(
 ) -> None:
     """Merge scoped permissions into the project opencode.json."""
     opencode_dir = target_repo / ".opencode"
-    opencode_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_safe_directory(target_repo, opencode_dir, manifest)
     proj_config = opencode_dir / "opencode.json"
 
     # Load existing config or create fresh
+    _track_backup(proj_config, manifest)
     if proj_config.exists():
-        backup = proj_config.with_suffix(".json" + _BACKUP_SUFFIX)
-        shutil.copy2(proj_config, backup)
-        manifest.backups[str(proj_config)] = backup
         existing = json.loads(proj_config.read_text())
     else:
-        manifest.backups[str(proj_config)] = None
         existing = {"$schema": "https://opencode.ai/config.json"}
 
     # Load the scoped permissions template
@@ -230,7 +273,7 @@ def inject_omlx_unload_script(
     target_repo: Path,
     model: str,
     base_url: str,
-    api_key: str,
+    manifest: InjectionManifest,
 ) -> None:
     """Write a helper script that unloads the primary oMLX model.
 
@@ -253,10 +296,14 @@ def inject_omlx_unload_script(
 # from oMLX so subagent models can load without OOM.
 set -euo pipefail
 URL="{unload_url}"
-AUTH="{api_key}"
+AUTH="${{SAST_REVIEW_OMLX_API_KEY:-}}"
+AUTH_ARGS=()
+if [ -n "$AUTH" ]; then
+  AUTH_ARGS=(-H "Authorization: Bearer $AUTH")
+fi
 echo "Unloading primary model: {model_id}"
 HTTP_CODE=$(curl -s -o /dev/null -w "%{{http_code}}" \\
-  -X POST -H "Authorization: Bearer $AUTH" \\
+  -X POST "${{AUTH_ARGS[@]}}" \\
   -H "Content-Type: application/json" "$URL" 2>/dev/null || echo "000")
 if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "400" ] || [ "$HTTP_CODE" = "404" ]; then
   echo "Primary model unloaded (HTTP $HTTP_CODE)"
@@ -266,10 +313,11 @@ else
 fi
 """
     sec_out = target_repo / ".security-output"
-    sec_out.mkdir(parents=True, exist_ok=True)
+    _ensure_safe_directory(target_repo, sec_out, manifest)
     script_path = sec_out / "omlx-unload.sh"
+    _track_backup(script_path, manifest)
     script_path.write_text(script)
-    script_path.chmod(0o755)
+    script_path.chmod(0o700)
     logger.info("Wrote oMLX unload script to %s", script_path)
 
 
@@ -283,10 +331,10 @@ def inject_graphify_plugin(
     The plugin injects a one-time reminder to use graphify query
     when graphify-out/graph.json exists.
     """
-    plugins_dir = target_repo / ".opencode" / "plugins"
-    if not plugins_dir.exists():
-        plugins_dir.mkdir(parents=True, exist_ok=True)
-        manifest.created_dirs.append(plugins_dir)
+    opencode_dir = target_repo / ".opencode"
+    _ensure_safe_directory(target_repo, opencode_dir, manifest)
+    plugins_dir = opencode_dir / "plugins"
+    _ensure_safe_directory(target_repo, plugins_dir, manifest)
 
     src = runner_dir / "plugins" / "graphify.js"
     if not src.exists():
@@ -331,9 +379,7 @@ def run_graphify_preprocess(
         True if graphify completed successfully, False otherwise.
     """
     graphify_out = target_repo / "graphify-out"
-    if graphify_out.exists() and (graphify_out / "graph.json").exists():
-        logger.info("graphify-out/graph.json already exists, skipping")
-        return True
+    graph_exists = graphify_out.exists() and (graphify_out / "graph.json").exists()
 
     if full_mode:
         if not llm_base_url or not llm_model:
@@ -342,7 +388,7 @@ def run_graphify_preprocess(
             )
             return False
         cmd = ["graphify", str(target_repo)]
-        env_extra = {
+        env_extra: dict[str, str] = {
             "OPENAI_BASE_URL": llm_base_url,
             "OPENAI_MODEL": llm_model,
             "OPENAI_API_KEY": llm_api_key,
@@ -352,6 +398,10 @@ def run_graphify_preprocess(
             llm_base_url,
             llm_model,
         )
+    elif graph_exists:
+        cmd = ["graphify", "update", str(target_repo)]
+        env_extra = {}
+        logger.info("Refreshing existing graphify knowledge graph")
     else:
         cmd = ["graphify", str(target_repo), "--code-only"]
         env_extra = {}
@@ -405,7 +455,7 @@ def run_sbom_preprocess(
         if the corresponding tool failed or wasn't available.
     """
     security_out = target_repo / ".security-output"
-    security_out.mkdir(parents=True, exist_ok=True)
+    _ensure_safe_directory(target_repo, security_out)
 
     sbom_path: Path | None = None
     grype_path: Path | None = None
@@ -417,6 +467,7 @@ def run_sbom_preprocess(
         return None, None
 
     sbom_path = security_out / "sbom.cyclonedx.json"
+    _reject_symlink(sbom_path)
     logger.info("Running syft SBOM generation on %s", target_repo.name)
     try:
         result = subprocess.run(
@@ -445,6 +496,7 @@ def run_sbom_preprocess(
         return sbom_path, None
 
     grype_path = security_out / "grype-results.json"
+    _reject_symlink(grype_path)
     logger.info("Running grype vulnerability scan against SBOM")
     try:
         result = subprocess.run(
@@ -507,6 +559,7 @@ def _write_grype_summary(grype_path: Path) -> None:
         })
 
     out = grype_path.parent / "grype-summary.json"
+    _reject_symlink(out)
     out.write_text(json.dumps(summary, indent=2) + "\n")
     logger.info("Grype summary written: %d vulnerabilities", len(summary))
 
@@ -534,11 +587,13 @@ def run_trufflehog_preprocess(
         return None
 
     security_out = target_repo / ".security-output"
-    security_out.mkdir(parents=True, exist_ok=True)
+    _ensure_safe_directory(target_repo, security_out)
     results_path = security_out / "trufflehog-results.json"
+    _reject_symlink(results_path)
 
     # Write exclusion patterns to a temp file (--exclude-paths expects a file)
     exclude_file = security_out / ".trufflehog-excludes"
+    _reject_symlink(exclude_file)
     exclude_file.write_text(
         "(?:^|/)\\.(opencode|git|security-output)/\n"
         "(?:^|/)node_modules/\n"
@@ -746,8 +801,9 @@ def write_diff_scope_file(
         return None
 
     security_out = target_repo / ".security-output"
-    security_out.mkdir(parents=True, exist_ok=True)
+    _ensure_safe_directory(target_repo, security_out)
     scope_file = security_out / "DIFF_SCOPE.md"
+    _reject_symlink(scope_file)
 
     lines = [
         "# Incremental Scan Scope",
@@ -815,7 +871,7 @@ def injection_context(
     verifier_model: str | None = None,
     primary_model: str = "",
     primary_base_url: str = "",
-    primary_api_key: str = "",
+    prior_knowledge: str | None = None,
 ) -> Generator[InjectionManifest]:
     """Context manager that injects config on entry and cleans up on exit.
 
@@ -829,6 +885,8 @@ def injection_context(
     file_cap = compute_file_cap(primary_model) if primary_model else _DEFAULT_FILE_CAP
     try:
         inject_commands(runner_dir, target_repo, manifest, file_cap=file_cap)
+        if prior_knowledge is not None:
+            inject_prior_knowledge(target_repo, prior_knowledge, manifest)
         inject_permissions(runner_dir, target_repo, manifest)
         inject_mcp_servers(target_repo, mcp_config, manifest)
         inject_agent_overrides(target_repo, critic_model, verifier_model)
@@ -836,8 +894,10 @@ def injection_context(
         # Inject oMLX unload script if primary is an oMLX model
         if primary_model and primary_model.startswith("omlx/"):
             inject_omlx_unload_script(
-                target_repo, primary_model,
-                primary_base_url, primary_api_key,
+                target_repo,
+                primary_model,
+                primary_base_url,
+                manifest,
             )
 
         # Inject graphify plugin if graphify was detected

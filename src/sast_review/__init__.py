@@ -11,15 +11,19 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID
 
 from sast_review.collect import AssessmentResult, parse_assessment
+from sast_review.fingerprint import derive_repository_id
 from sast_review.inject import (
     InjectionManifest,
     compute_callers,
@@ -31,9 +35,19 @@ from sast_review.inject import (
     run_trufflehog_preprocess,
     write_diff_scope_file,
 )
+from sast_review.knowledge_pipeline import (
+    DEFAULT_KNOWLEDGE_DATABASE,
+    DEFAULT_KNOWLEDGE_MCP_URL,
+    KNOWLEDGE_OPERATION_ERRORS,
+    KnowledgeArtifacts,
+    KnowledgePreparation,
+    collect_knowledge_artifacts,
+    prepare_knowledge,
+)
 from sast_review.monitor import SessionMonitor
 from sast_review.tools import (
     DetectedTool,
+    build_knowledge_mcp_config,
     build_mcp_config,
     detect_all,
     missing_tool_hints,
@@ -53,6 +67,28 @@ DEFAULT_TIMEOUT = 0  # 0 = no timeout (run until completion)
 
 # Global opencode config path (provider definitions live here)
 _OPENCODE_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
+_SESSION_ID_PATTERN = re.compile(r'"sessionID"\s*:\s*"([^"]+)"')
+
+
+def _resolve_repository_id(
+    target_repo: Path,
+    repository_id: UUID | None,
+    knowledge_enabled: bool,
+) -> UUID | None:
+    if not knowledge_enabled or repository_id is not None:
+        return repository_id
+    try:
+        derived = derive_repository_id(target_repo)
+    except (OSError, ValueError, subprocess.SubprocessError, UnicodeError) as exc:
+        logger.warning("Persistent knowledge unavailable: repository identity failed: %s", exc)
+        return None
+    logger.info("Derived stable repository ID: %s", derived)
+    return derived
+
+
+def _session_id_from_events(events: str) -> str | None:
+    match = _SESSION_ID_PATTERN.search(events)
+    return match.group(1) if match else None
 
 
 def _resolve_provider(model: str) -> tuple[str, str, str]:
@@ -110,6 +146,10 @@ class RunResult:
     events_path: Path | None = None
     tools_detected: list[str] = field(default_factory=list)
     graphify_ran: bool = False
+    knowledge_bundle_path: Path | None = None
+    knowledge_ingested: bool = False
+    prior_active_count: int = 0
+    prior_stale_count: int = 0
     error: str | None = None
 
     def summary_line(self) -> str:
@@ -137,6 +177,21 @@ def _derive_label(model: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in name).strip("_")
 
 
+def _is_safe_target_file(path: Path, target_repo: Path) -> bool:
+    try:
+        return (
+            not path.is_symlink()
+            and path.is_file()
+            and path.resolve(strict=True).is_relative_to(target_repo.resolve(strict=True))
+        )
+    except OSError:
+        return False
+
+
+def _is_fresh_target_file(path: Path, target_repo: Path, started_at_ns: int) -> bool:
+    return _is_safe_target_file(path, target_repo) and path.stat().st_mtime_ns > started_at_ns
+
+
 def _ensure_output_dir(
     base_output: Path,
     repo_name: str,
@@ -155,6 +210,8 @@ def execute_review(
     label: str,
     timeout_seconds: int = DEFAULT_TIMEOUT,
     use_headroom: bool = True,
+    runtime_env: Mapping[str, str] | None = None,
+    session_id: str | None = None,
 ) -> tuple[float, int, str, str, bool]:
     """Run the security review headlessly via opencode.
 
@@ -168,6 +225,8 @@ def execute_review(
         label: label string passed as $1 to the command.
         timeout_seconds: max seconds before killing. 0 = no timeout.
         use_headroom: if True, invoke via 'headroom wrap opencode'.
+        runtime_env: additional in-memory environment values for the child only.
+        session_id: existing OpenCode session to resume for completion repair.
 
     Returns:
         Tuple of (wall_seconds, exit_code, stdout, stderr, timed_out).
@@ -179,15 +238,33 @@ def execute_review(
     else:
         cmd = ["opencode", "run"]
 
-    cmd.extend([
-        "--command", "security-review",
-        "--model", model,
-        "--auto",
-        "--format", "json",
-        "--print-logs",
-        "--dir", str(target_repo),
-        label,
-    ])
+    if session_id is None:
+        cmd.extend([
+            "--command", "security-review",
+            "--model", model,
+            "--auto",
+            "--format", "json",
+            "--print-logs",
+            "--dir", str(target_repo),
+            label,
+        ])
+    else:
+        cmd.extend([
+            "--session", session_id,
+            "--model", model,
+            "--auto",
+            "--format", "json",
+            "--print-logs",
+            "--dir", str(target_repo),
+            (
+                "Resume the existing security-review workflow without repeating analysis or "
+                "invoking subagents again. Read the current assessment and complete only the "
+                "unfinished mandated steps using the @critic and @verifier results already in "
+                "this session: process their outputs, append all required per-finding records "
+                "and aggregate checkpoints, then append ## Validation and ## Run metadata. "
+                "Finish only after the assessment satisfies the injected review contract."
+            ),
+        ])
 
     logger.info("Executing: %s", " ".join(cmd))
     t_start = time.monotonic()
@@ -196,7 +273,11 @@ def execute_review(
 
     # Disable lazy-load plugin for headless runs — models can't navigate
     # the load_tool indirection reliably without interactive feedback.
-    env = {**os.environ, "OPENCODE_NO_LAZY_LOAD": "1"}
+    env = {
+        **os.environ,
+        **(runtime_env or {}),
+        "OPENCODE_NO_LAZY_LOAD": "1",
+    }
 
     # Start live session monitor
     assessment_path = target_repo / ".security-output" / f"SEC_ASSESSMENT_{label}.md"
@@ -220,6 +301,9 @@ def execute_review(
     finally:
         monitor.stop()
 
+    if session_id is None and monitor.session_id and _session_id_from_events(stdout) is None:
+        stdout += json.dumps({"type": "session", "sessionID": monitor.session_id}) + "\n"
+
     wall = time.monotonic() - t_start
     exit_code = proc.returncode or 0
     logger.info(
@@ -227,6 +311,70 @@ def execute_review(
         exit_code, wall, timed_out,
     )
     return wall, exit_code, stdout, stderr, timed_out
+
+
+def _execute_with_completion_repair(
+    target_repo: Path,
+    model: str,
+    label: str,
+    timeout_seconds: int,
+    use_headroom: bool,
+    runtime_env: Mapping[str, str] | None,
+) -> tuple[float, int, str, str, bool]:
+    assessment_path = target_repo / ".security-output" / f"SEC_ASSESSMENT_{label}.md"
+    original_state = (
+        (assessment_path.stat().st_mtime_ns, assessment_path.stat().st_size)
+        if assessment_path.exists()
+        else None
+    )
+    result = execute_review(
+        target_repo,
+        model,
+        label,
+        timeout_seconds,
+        use_headroom,
+        runtime_env=runtime_env,
+    )
+    wall, exit_code, stdout, stderr, timed_out = result
+    if exit_code != 0 or timed_out or not assessment_path.exists():
+        return result
+    current_state = (assessment_path.stat().st_mtime_ns, assessment_path.stat().st_size)
+    assessment = parse_assessment(assessment_path)
+    if current_state == original_state:
+        logger.error("Review did not produce a fresh assessment")
+        return wall, 2, stdout, stderr, timed_out
+    if assessment.is_complete:
+        return result
+    session_id = _session_id_from_events(stdout)
+    if session_id is None:
+        logger.error("Assessment is incomplete and the OpenCode session ID is unavailable")
+        return wall, 2, stdout, stderr, timed_out
+    logger.warning(
+        "Assessment is incomplete (%s); resuming session once to finish the contract",
+        ", ".join(assessment.sections_missing) or "validation checkpoints",
+    )
+    repair = execute_review(
+        target_repo,
+        model,
+        label,
+        timeout_seconds,
+        use_headroom,
+        runtime_env=runtime_env,
+        session_id=session_id,
+    )
+    repair_wall, repair_exit, repair_stdout, repair_stderr, repair_timed_out = repair
+    final_assessment = parse_assessment(assessment_path)
+    final_exit = repair_exit
+    if final_exit == 0 and not repair_timed_out and not final_assessment.is_complete:
+        logger.error("Assessment remains incomplete after one completion repair")
+        final_exit = 2
+    return (
+        wall + repair_wall,
+        final_exit,
+        stdout + repair_stdout,
+        stderr + repair_stderr,
+        timed_out or repair_timed_out,
+    )
 
 
 def run_single(
@@ -243,6 +391,11 @@ def run_single(
     diff_ref: str | None = None,
     critic_model: str | None = None,
     verifier_model: str | None = None,
+    repository_id: UUID | None = None,
+    knowledge_database: Path = DEFAULT_KNOWLEDGE_DATABASE,
+    knowledge_mcp_url: str = DEFAULT_KNOWLEDGE_MCP_URL,
+    knowledge_enabled: bool = True,
+    knowledge_ingest: bool = True,
 ) -> RunResult:
     """Execute a single security review against a target repository.
 
@@ -270,11 +423,21 @@ def run_single(
         diff_ref: git ref for incremental scanning (None = full scan).
         critic_model: override the critic subagent model (None = use default).
         verifier_model: override the verifier subagent model (None = use default).
+        repository_id: optional stable UUID override; derived from Git when omitted.
+        knowledge_database: authoritative SQLite knowledge database.
+        knowledge_mcp_url: loopback Streamable HTTP MCP endpoint.
+        knowledge_enabled: enable knowledge retrieval and artifact collection.
+        knowledge_ingest: commit eligible results to shared knowledge state.
 
     Returns:
         RunResult with timing, assessment, and quality data.
     """
     repo_name = target_repo.resolve().name
+    repository_id = _resolve_repository_id(
+        target_repo,
+        repository_id,
+        knowledge_enabled,
+    )
     if label is None:
         label = _derive_label(model)
     if output_dir is None:
@@ -284,6 +447,8 @@ def run_single(
 
     run_out = _ensure_output_dir(output_dir, repo_name, label)
     tool_names = [t.name for t in detected_tools]
+    knowledge_preparation: KnowledgePreparation | None = None
+    knowledge_artifacts: KnowledgeArtifacts | None = None
 
     # Phase 1: graphify pre-processing
     # Resolve the primary model's provider endpoint so graphify uses
@@ -329,10 +494,46 @@ def run_single(
         callers = compute_callers(target_repo, changed_files)
         write_diff_scope_file(target_repo, changed_files, callers, diff_ref)
 
-    # Phase 4: build MCP config for detected tools
+    # Phase 4: prepare persistent knowledge and MCP config
+    if knowledge_enabled and repository_id is not None:
+        try:
+            knowledge_preparation = prepare_knowledge(
+                target_repo,
+                repository_id,
+                knowledge_database,
+            )
+            logger.info(
+                "Prior knowledge: %d active, %d stale",
+                knowledge_preparation.active_count,
+                knowledge_preparation.stale_count,
+            )
+        except KNOWLEDGE_OPERATION_ERRORS as exc:
+            logger.warning("Persistent knowledge unavailable: %s", exc)
+
     mcp_config = build_mcp_config(detected_tools, target_repo)
+    if knowledge_enabled and repository_id is not None:
+        try:
+            knowledge_mcp = build_knowledge_mcp_config(
+                knowledge_mcp_url,
+                database_path=knowledge_database,
+            )
+        except ValueError as exc:
+            logger.warning("Invalid knowledge MCP URL; continuing without MCP: %s", exc)
+            knowledge_mcp = {}
+        if knowledge_mcp:
+            mcp_config.update(knowledge_mcp)
+            transport = knowledge_mcp["laser-knowledge"]["type"]
+            logger.info("Knowledge MCP configured with %s transport", transport)
+        else:
+            logger.info("Knowledge MCP is unavailable; continuing without MCP")
 
     # Phase 5: inject and execute
+    review_started_at_ns = time.time_ns()
+    review_runtime_env = (
+        {"SAST_REVIEW_OMLX_API_KEY": llm_api_key}
+        if model.startswith("omlx/")
+        else None
+    )
     if keep_injected:
         # No cleanup — inject manually
         manifest = InjectionManifest()
@@ -343,23 +544,38 @@ def run_single(
             inject_mcp_servers,
             inject_omlx_unload_script,
             inject_permissions,
+            inject_prior_knowledge,
         )
         inject_commands(
             _RUNNER_DIR, target_repo, manifest,
             file_cap=compute_file_cap(model),
         )
+        if knowledge_preparation is not None:
+            inject_prior_knowledge(
+                target_repo,
+                knowledge_preparation.prior_markdown,
+                manifest,
+            )
         inject_permissions(_RUNNER_DIR, target_repo, manifest)
         inject_mcp_servers(target_repo, mcp_config, manifest)
         inject_agent_overrides(target_repo, critic_model, verifier_model)
         if model.startswith("omlx/"):
             inject_omlx_unload_script(
-                target_repo, model, llm_base_url, llm_api_key,
+                target_repo,
+                model,
+                llm_base_url,
+                manifest,
             )
         if any(t.name == "graphify" for t in detected_tools):
             inject_graphify_plugin(_RUNNER_DIR, target_repo, manifest)
 
-        wall, exit_code, stdout, stderr, timed_out = execute_review(
-            target_repo, model, label, timeout, use_headroom,
+        wall, exit_code, stdout, stderr, timed_out = _execute_with_completion_repair(
+            target_repo,
+            model,
+            label,
+            timeout,
+            use_headroom,
+            review_runtime_env,
         )
     else:
         with injection_context(
@@ -368,10 +584,19 @@ def run_single(
             verifier_model=verifier_model,
             primary_model=model,
             primary_base_url=llm_base_url,
-            primary_api_key=llm_api_key,
+            prior_knowledge=(
+                knowledge_preparation.prior_markdown
+                if knowledge_preparation is not None
+                else None
+            ),
         ):
-            wall, exit_code, stdout, stderr, timed_out = execute_review(
-                target_repo, model, label, timeout, use_headroom,
+            wall, exit_code, stdout, stderr, timed_out = _execute_with_completion_repair(
+                target_repo,
+                model,
+                label,
+                timeout,
+                use_headroom,
+                review_runtime_env,
             )
 
     # Phase 6: collect results
@@ -398,9 +623,20 @@ def run_single(
         logger.info("TruffleHog results collected: %s", run_out / trufflehog_path.name)
 
     # Find and copy the assessment file
-    assessment_glob = list(
-        (target_repo / ".security-output").glob(f"SEC_ASSESSMENT_{label}*")
+    security_out = target_repo / ".security-output"
+    exact_assessment = security_out / f"SEC_ASSESSMENT_{label}.md"
+    assessment_glob = sorted(
+        (
+            path
+            for path in security_out.glob(f"SEC_ASSESSMENT_{label}*")
+            if _is_fresh_target_file(path, target_repo, review_started_at_ns)
+        ),
+        key=lambda path: path.stat().st_mtime_ns,
+        reverse=True,
     )
+    if exact_assessment in assessment_glob:
+        assessment_glob.remove(exact_assessment)
+        assessment_glob.insert(0, exact_assessment)
     assessment: AssessmentResult | None = None
     if assessment_glob:
         src_assessment = assessment_glob[0]
@@ -413,13 +649,66 @@ def run_single(
         # Try to parse any assessment file
         security_out = target_repo / ".security-output"
         if security_out.exists():
-            all_assessments = list(security_out.glob("SEC_ASSESSMENT_*"))
+            all_assessments = sorted(
+                (
+                    path
+                    for path in security_out.glob("SEC_ASSESSMENT_*")
+                    if _is_fresh_target_file(path, target_repo, review_started_at_ns)
+                ),
+                key=lambda path: path.stat().st_mtime_ns,
+                reverse=True,
+            )
             if all_assessments:
                 src_assessment = all_assessments[0]
                 dst_assessment = run_out / src_assessment.name
                 shutil.copy2(src_assessment, dst_assessment)
                 assessment = parse_assessment(dst_assessment)
                 logger.info("Assessment collected (fuzzy match): %s", dst_assessment)
+
+    if exit_code == 0 and (assessment is None or not assessment.is_complete):
+        logger.error("Review process exited successfully without a complete assessment")
+        exit_code = 2
+
+    if (
+        knowledge_preparation is not None
+        and repository_id is not None
+        and assessment is not None
+        and assessment.exists
+    ):
+        prompt_files = (
+            "security-review.md",
+            "security-review-ref.md",
+            "critic-prompt.txt",
+            "verifier-prompt.txt",
+        )
+        prompt_text = "\n\n".join(
+            (_RUNNER_DIR / "commands" / filename).read_text(encoding="utf-8")
+            for filename in prompt_files
+        )
+        try:
+            knowledge_artifacts = collect_knowledge_artifacts(
+                assessment.path,
+                target_repo,
+                run_out,
+                repository_id,
+                knowledge_preparation.store,
+                primary_model_id=model,
+                critic_model_id=critic_model,
+                verifier_model_id=verifier_model,
+                prompt_text=prompt_text,
+                detected_tool_versions={tool.name: tool.version for tool in detected_tools},
+                ingest=knowledge_ingest and assessment.is_complete,
+            )
+            logger.info("Knowledge bundle collected: %s", knowledge_artifacts.bundle_path)
+            if knowledge_artifacts.ingest_result is not None:
+                logger.info(
+                    "Knowledge bundle ingested: %s",
+                    knowledge_artifacts.ingest_result.bundle_id,
+                )
+            elif knowledge_ingest and not assessment.is_complete:
+                logger.warning("Incomplete assessment was not ingested into shared knowledge")
+        except KNOWLEDGE_OPERATION_ERRORS as exc:
+            logger.warning("Knowledge collection failed: %s", exc)
 
     # Save run metadata
     result = RunResult(
@@ -433,6 +722,23 @@ def run_single(
         events_path=events_path,
         tools_detected=tool_names,
         graphify_ran=graphify_ran,
+        knowledge_bundle_path=(
+            knowledge_artifacts.bundle_path if knowledge_artifacts is not None else None
+        ),
+        knowledge_ingested=(
+            knowledge_artifacts is not None
+            and knowledge_artifacts.ingest_result is not None
+        ),
+        prior_active_count=(
+            knowledge_preparation.active_count
+            if knowledge_preparation is not None
+            else 0
+        ),
+        prior_stale_count=(
+            knowledge_preparation.stale_count
+            if knowledge_preparation is not None
+            else 0
+        ),
     )
 
     metrics = {
@@ -457,6 +763,21 @@ def run_single(
         "critic_completed": assessment.critic_completed if assessment else False,
         "verifier_completed": assessment.verifier_completed if assessment else False,
         "is_complete": assessment.is_complete if assessment else False,
+        "repository_id": str(repository_id) if repository_id is not None else None,
+        "knowledge_enabled": knowledge_enabled and repository_id is not None,
+        "knowledge_bundle": (
+            str(knowledge_artifacts.bundle_path)
+            if knowledge_artifacts is not None
+            else None
+        ),
+        "knowledge_ingested": result.knowledge_ingested,
+        "prior_active_count": result.prior_active_count,
+        "prior_stale_count": result.prior_stale_count,
+        "knowledge_warning_count": (
+            len(knowledge_artifacts.warnings)
+            if knowledge_artifacts is not None
+            else 0
+        ),
     }
     (run_out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
 
@@ -473,6 +794,10 @@ def run_benchmark(
     graphify_full: bool = False,
     critic_model: str | None = None,
     verifier_model: str | None = None,
+    repository_id: UUID | None = None,
+    knowledge_database: Path = DEFAULT_KNOWLEDGE_DATABASE,
+    knowledge_mcp_url: str = DEFAULT_KNOWLEDGE_MCP_URL,
+    knowledge_enabled: bool = True,
 ) -> list[RunResult]:
     """Run the security review for each model sequentially.
 
@@ -486,6 +811,10 @@ def run_benchmark(
         graphify_full: use full graphify mode.
         critic_model: override the critic subagent model.
         verifier_model: override the verifier subagent model.
+        repository_id: optional stable UUID override; derived from Git when omitted.
+        knowledge_database: authoritative SQLite knowledge database.
+        knowledge_mcp_url: loopback Streamable HTTP MCP endpoint.
+        knowledge_enabled: enable retrieval and per-run bundles without ingestion.
 
     Returns:
         List of RunResult, one per model.
@@ -515,8 +844,13 @@ def run_benchmark(
 
         # Clean .security-output between runs
         security_out = target_repo / ".security-output"
+        if security_out.is_symlink():
+            raise RuntimeError("refusing to clean symlinked .security-output")
         if security_out.exists():
-            shutil.rmtree(security_out)
+            resolved_output = security_out.resolve(strict=True)
+            if not resolved_output.is_relative_to(target_repo.resolve(strict=True)):
+                raise RuntimeError("refusing to clean output outside target repository")
+            shutil.rmtree(resolved_output)
             logger.debug("Cleaned .security-output/ for fresh run")
 
         result = run_single(
@@ -530,6 +864,11 @@ def run_benchmark(
             detected_tools=detected_tools,
             critic_model=critic_model,
             verifier_model=verifier_model,
+            repository_id=repository_id,
+            knowledge_database=knowledge_database,
+            knowledge_mcp_url=knowledge_mcp_url,
+            knowledge_enabled=knowledge_enabled,
+            knowledge_ingest=False,
         )
         _append_runner_summary(result)
         results.append(result)
@@ -637,6 +976,15 @@ def _format_summary(result: RunResult) -> str:
 
     lines.append(f"  Tools:      {', '.join(result.tools_detected) or 'none'}")
     lines.append(f"  Graphify:   {'ran' if result.graphify_ran else 'skipped'}")
+    if result.knowledge_bundle_path is not None:
+        lines.append(f"  Knowledge:  {result.knowledge_bundle_path}")
+        lines.append(
+            "  Prior:      "
+            f"{result.prior_active_count} active, {result.prior_stale_count} stale"
+        )
+        lines.append(
+            f"  Ingested:   {'yes' if result.knowledge_ingested else 'no'}"
+        )
     return "\n".join(lines)
 
 
@@ -742,6 +1090,29 @@ def main() -> None:
         help="Output directory (default: <runner>/output)",
     )
     parser.add_argument(
+        "--repo-id",
+        type=UUID,
+        default=None,
+        metavar="UUID",
+        help="Override the stable repository UUID derived from Git",
+    )
+    parser.add_argument(
+        "--knowledge-db",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_DATABASE,
+        help="Persistent knowledge SQLite database",
+    )
+    parser.add_argument(
+        "--knowledge-mcp-url",
+        default=DEFAULT_KNOWLEDGE_MCP_URL,
+        help="Loopback Streamable HTTP knowledge MCP endpoint",
+    )
+    parser.add_argument(
+        "--no-knowledge",
+        action="store_true",
+        help="Disable persistent knowledge retrieval, export, and ingestion",
+    )
+    parser.add_argument(
         "--keep-injected",
         action="store_true",
         help="Don't clean up injected .opencode files after run",
@@ -773,6 +1144,12 @@ def main() -> None:
         logger.error("Target repo does not exist: %s", target_repo)
         sys.exit(1)
 
+    repository_id = _resolve_repository_id(
+        target_repo,
+        args.repo_id,
+        not args.no_knowledge,
+    )
+
     # Tool detection (always runs)
     detected = detect_all()
     print(f"Tools detected: {', '.join(t.name for t in detected) or 'none'}")
@@ -798,6 +1175,10 @@ def main() -> None:
         print(f"Critic: {args.critic} (override)")
     if args.verifier:
         print(f"Verifier: {args.verifier} (override)")
+    if not args.no_knowledge and repository_id is not None:
+        identity_source = "explicit" if args.repo_id is not None else "derived"
+        print(f"Repo ID: {repository_id} ({identity_source})")
+        print(f"Knowledge DB: {args.knowledge_db.expanduser()}")
 
     if args.benchmark:
         # Benchmark mode
@@ -816,6 +1197,10 @@ def main() -> None:
             graphify_full=args.graphify_full,
             critic_model=args.critic,
             verifier_model=args.verifier,
+            repository_id=repository_id,
+            knowledge_database=args.knowledge_db,
+            knowledge_mcp_url=args.knowledge_mcp_url,
+            knowledge_enabled=not args.no_knowledge,
         )
     else:
         # Single run mode
@@ -833,6 +1218,10 @@ def main() -> None:
             diff_ref=args.diff,
             critic_model=args.critic,
             verifier_model=args.verifier,
+            repository_id=repository_id,
+            knowledge_database=args.knowledge_db,
+            knowledge_mcp_url=args.knowledge_mcp_url,
+            knowledge_enabled=not args.no_knowledge,
         )
         _append_runner_summary(result)
         _print_result(result)

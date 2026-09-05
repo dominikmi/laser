@@ -1,7 +1,10 @@
 Read `.opencode/commands/security-review-ref.md` for the finding format
 spec, then verify the SEC_ASSESSMENT file in `.security-output/`.
-Verify max 15 findings — prioritize CRITICAL and HIGH severity first.
-For each finding:
+Independently check every CRITICAL/HIGH finding, in report order, up to 15.
+Prior-knowledge status never substitutes for these checks. Do not check
+lower-severity findings; they need no output records.
+
+For each CRITICAL/HIGH finding actually checked:
 1. Read the file at the cited path. Confirm it exists.
 2. Confirm line numbers match the code snippet.
 3. Confirm code snippet is verbatim (not hallucinated).
@@ -9,5 +12,16 @@ For each finding:
    Skip intermediate hops if context is tight.
 5. For deps: confirm package version matches.
 
-For each discrepancy: one line — finding title, what is wrong, actual
-value. Do NOT add observations, praise, suggestions, or explanations.
+Emit exactly one compact JSON object on one line per checked finding, with
+exactly these keys in this order:
+`{"finding_id":"F-NNN","result":"verified|corrected|removed","checks_performed":["path","line","snippet","trace","dependency_version"],"evidence_locations":["path:line"],"detail":"..."}`
+
+Use exactly one result value: `verified` when the finding is accurate;
+`corrected` when it remains valid but any path, line, snippet, trace, version,
+or confidence needs correction; `removed` when evidence disproves it. Include
+only applicable check names from the shown enum, at least one check and one
+evidence location, an exact `F-[0-9][0-9][0-9]` ID, and compact actionable
+actual values in `detail` for corrections/removals.
+Output JSON Lines only: no markdown fences, headings, blank lines, prose,
+observations, praise, suggestions, or records for lower severities. If there
+are no CRITICAL/HIGH findings, emit nothing.

@@ -107,17 +107,32 @@ need to share or separate knowledge or when a shallow repository has no origin;
 
 ```mermaid
 %%{init: {"theme": "dark"}}%%
-graph LR
-    A["sast-review CLI"] --> B["Tool Detection"]
-    B --> C["graphify<br/>pre-processing"]
-    C --> D["Inject .opencode/<br/>into target repo"]
+flowchart LR
+    A["sast-review CLI"] --> ID["Derive repository ID<br/>or use --repo-id"]
+    A --> B["Detect tools +<br/>run pre-processors"]
+    ID --> K["Open SQLite/WAL<br/>knowledge ledger"]
+    K --> P["Refresh same-repo evidence<br/>render prior context"]
+    K --> M{"Knowledge MCP daemon<br/>reachable?"}
+    M -- yes --> MH["Read-only HTTP MCP"]
+    M -- no --> MS["Read-only stdio MCP"]
+    B --> D["Inject commands,<br/>permissions + tools"]
+    P --> D
+    MH --> D
+    MS --> D
     D --> E["opencode run<br/>headless"]
-    E --> F["Collect results"]
-    F --> G["Cleanup<br/>restore backups"]
+    E --> R{"Assessment<br/>complete?"}
+    R -- no --> C["Resume same session once"]
+    C --> R
+    R -- yes --> G["Cleanup or retain<br/>injected files"]
+    G --> F["Collect assessment,<br/>evidence bundle + OKF"]
+    F --> V{"Complete + verifier<br/>evidence covered?"}
+    V -- yes --> K
+    V -- no --> X["Do not ingest"]
 
     subgraph Target_Repo["Target Repository"]
         D
         E
+        C
     end
 ```
 
@@ -234,13 +249,21 @@ model ends up reviewing perhaps ten files instead of the full hundred.
 ```mermaid
 %%{init: {"theme": "dark"}}%%
 flowchart TD
-    A["Detect tools<br/>on PATH"] --> B["Build MCP<br/>server configs"]
+    A["Detect tools<br/>on PATH"] --> B["Build scanner MCP<br/>server configs"]
+    ID["Resolve stable<br/>repository ID"] --> K["Open SQLite/WAL<br/>knowledge ledger"]
+    K --> P["Refresh evidence + render<br/>PRIOR_KNOWLEDGE.md"]
+    K --> M{"HTTP knowledge MCP<br/>reachable?"}
+    M -- yes --> MH["Configure remote<br/>loopback HTTP MCP"]
+    M -- no --> MS["Configure local<br/>stdio MCP child"]
     B --> C{"Target has<br/>.opencode/ ?"}
+    MH --> C
+    MS --> C
     C -- yes --> D["Back up existing<br/>.opencode/ files"]
     C -- no --> E["Create<br/>.opencode/"]
-    D --> F["Inject commands<br/>permissions, MCP"]
+    D --> F["Inject commands,<br/>permissions + MCP"]
     E --> F
-    F --> G["Inject graphify<br/>plugin if detected"]
+    P --> F
+    F --> G["Inject graphify plugin<br/>and subagent prompts"]
     G --> H["Proceed to<br/>Phase 2"]
 ```
 
@@ -271,9 +294,10 @@ security review of itself.
    control precisely what the model is and is not allowed to do during headless
    execution (see [Scoped permissions](#scoped-permissions) further below).
 
-3. **MCP server entries** — for each detected MCP-capable tool, a corresponding
-   server configuration is added to `.opencode/opencode.json` so that OpenCode
-   starts the tool alongside the review session.
+3. **MCP server entries** — each detected MCP-capable scanner is added to
+   `.opencode/opencode.json`. Persistent knowledge uses the read-only loopback
+   HTTP daemon when reachable, otherwise the runner configures an automatic
+   local stdio child against the same SQLite ledger.
 
 4. **Subagent prompts** — `critic-prompt.txt` and `verifier-prompt.txt` are
    copied into `.security-output/`. The model reads these files at Steps 11
@@ -301,13 +325,20 @@ or times out halfway through.
 %%{init: {"theme": "dark"}}%%
 flowchart TD
     A["Build opencode<br/>command"] --> B["subprocess.Popen"]
-    B --> C["stdout: JSON events<br/>stderr: logs"]
+    B --> C["Capture JSON events,<br/>stderr + session ID"]
     C --> D{"Timeout<br/>reached?"}
-    D -- no --> E["proc.communicate<br/>waits for exit"]
-    D -- yes --> F["proc.kill<br/>capture partial"]
-    E --> G["Record wall time<br/>exit code"]
-    F --> G
-    G --> H["Proceed to<br/>Phase 3 output"]
+    D -- yes --> F["Kill process<br/>capture partial output"]
+    D -- no --> E["Wait for process exit"]
+    E --> G{"Fresh assessment<br/>complete?"}
+    G -- yes --> H["Record successful<br/>result"]
+    G -- no --> S{"Session ID<br/>available?"}
+    S -- yes --> R["Resume same session once<br/>complete remaining steps"]
+    R --> V{"Assessment now<br/>complete?"}
+    V -- yes --> H
+    V -- no --> X["Return exit code 2"]
+    S -- no --> X
+    F --> Y["Return timeout<br/>or process failure"]
+    H --> Z["Proceed to<br/>collection"]
 ```
 
 At this point the runner hands control to OpenCode by executing:
@@ -371,7 +402,8 @@ flowchart TD
     S2 --> S2b["Step 2b<br/>Read README + deploy configs<br/>Write ## Context"]
     S2b --> S3["Step 3<br/>Read graphify-out<br/>if present"]
     S3 --> S3b["Step 3b<br/>Tool-assisted scans<br/>semgrep / trufflehog / serena"]
-    S3b --> S4["Step 4<br/>Map attack surface<br/>entry points + trust boundaries"]
+    S3b --> S3c["Step 3c<br/>Read bounded prior context<br/>ACTIVE / STALE / pattern leads"]
+    S3c --> S4["Step 4<br/>Map attack surface<br/>entry points + trust boundaries"]
     S4 --> S4b["Step 4b<br/>Attack-path tracing<br/>dead-code detection<br/>via graphify"]
     S4b --> S5["Step 5<br/>List source files<br/>exclude tests/vendor/generated"]
     S5 --> S6["Step 6<br/>Prioritised scan<br/>attack paths first"]
@@ -861,14 +893,27 @@ assessment file is the canonical output — everything else would be redundant.
 ```mermaid
 %%{init: {"theme": "dark"}}%%
 flowchart TD
-    A["Copy SEC_ASSESSMENT<br/>to output/"] --> B["Save JSON events<br/>to output/"]
-    B --> C["Save stderr logs<br/>to output/"]
-    C --> D["Parse assessment<br/>validate sections"]
-    D --> E["Write metrics.json"]
-    E --> F{"--keep-injected ?"}
-    F -- no --> G["Restore .opencode/<br/>from backups"]
-    F -- yes --> H["Leave injected<br/>files in place"]
-    G --> I["Print result<br/>summary"]
+    A{"--keep-injected ?"} -- no --> B["Restore injected files<br/>from backups"]
+    A -- yes --> C["Leave injected<br/>files in place"]
+    B --> D["Select fresh assessment<br/>prefer exact label"]
+    C --> D
+    D --> E["Copy assessment + scanner<br/>artifacts to output/"]
+    E --> F["Save JSON events<br/>and stderr logs"]
+    F --> G["Parse findings, sections<br/>and subagent checkpoints"]
+    G --> H["Write metrics.json"]
+    G --> K{"Knowledge<br/>enabled?"}
+    K -- no --> I["Print result summary"]
+    K -- yes --> J["Write canonical<br/>review-evidence.json"]
+    J --> O["Export one-way<br/>OKF v0.2 view"]
+    O --> V{"Assessment<br/>complete?"}
+    V -- no --> N["Keep run artifacts<br/>do not ingest"]
+    V -- yes --> L["Ingest bundle into<br/>SQLite/WAL ledger"]
+    L --> Q{"Exact verifier evidence<br/>covers finding?"}
+    Q -- yes --> P["Promote eligible finding<br/>to verified_active"]
+    Q -- no --> T["Keep candidate / stale /<br/>rejected state"]
+    P --> I
+    T --> I
+    N --> I
     H --> I
 ```
 
@@ -907,6 +952,39 @@ against the current repository, and injects a bounded
 CRITICAL/HIGH findings with explicit per-finding verifier records and exact
 locally recomputed evidence-hash coverage become `verified_active`. Changed or
 missing evidence is marked `stale` and must be reviewed again.
+
+```mermaid
+%%{init: {"theme": "dark"}}%%
+flowchart LR
+    subgraph Writer["Authoritative writer: sast-review"]
+        ID["Git identity<br/>or --repo-id"] --> PREP["Refresh prior evidence"]
+        PREP --> PRIOR["Bounded<br/>PRIOR_KNOWLEDGE.md"]
+        ASSESS["Completed assessment"] --> BUNDLE["Typed evidence bundle"]
+        BUNDLE --> GATE{"Verifier hashes cover<br/>required evidence?"}
+        GATE -- yes --> INGEST["Transactional ingestion"]
+        GATE -- no --> HOLD["Retain non-verified state"]
+        BUNDLE --> OKF["One-way OKF export"]
+    end
+
+    DB[("SQLite/WAL<br/>knowledge ledger")]
+    PREP <--> DB
+    INGEST --> DB
+    HOLD --> DB
+
+    subgraph Reader["Read-only knowledge MCP"]
+        HTTP["Loopback HTTP daemon<br/>when reachable"]
+        STDIO["Automatic stdio child<br/>otherwise"]
+        SEARCH["Generalized cross-repo<br/>pattern leads only"]
+        HTTP --> SEARCH
+        STDIO --> SEARCH
+    end
+
+    DB --> HTTP
+    DB --> STDIO
+    PRIOR --> OC["OpenCode review"]
+    SEARCH -. "optional query" .-> OC
+    OC --> ASSESS
+```
 
 The local service is deliberately split by authority:
 
@@ -959,6 +1037,14 @@ flowchart TD
         SR["Serena<br/>LSP symbol lookup<br/>call references"]
     end
 
+    subgraph Knowledge["Persistent Knowledge"]
+        KL[("SQLite/WAL<br/>evidence ledger")]
+        KP["Same-repo prior context<br/>hash-refreshed"]
+        KM["Knowledge MCP<br/>pattern leads only"]
+        KL --> KP
+        KL --> KM
+    end
+
     subgraph LLM_Judgment["LLM Judgment"]
         PR["Primary Model<br/>reachability analysis<br/>business logic review<br/>data flow tracing<br/>classification"]
         CR["@critic<br/>independent review<br/>false positive check<br/>missed vuln check"]
@@ -966,15 +1052,19 @@ flowchart TD
     end
 
     SG --> PR
-    LF --> PR
+    TH --> PR
     OSV --> PR
     SY --> PR
     GR --> PR
     SR --> PR
+    KP --> PR
+    KM -. "optional" .-> PR
     PR --> CR
     CR --> PR
     PR --> VR
     VR --> PR
+    VR --> GI{"Completeness +<br/>evidence gate"}
+    GI -- pass --> KL
 ```
 
 | Tool | What it provides | What it cannot do |

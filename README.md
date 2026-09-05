@@ -12,10 +12,6 @@ There are no ground-truth files to maintain, no coupling to a specific
 benchmark suite. It works on any codebase, in any language that the underlying
 tools and models can handle. And it works with local LLMs too! Tested with llama.cpp on Linux AMD w/ Vulkan and oMLX on MacOS M3 Pro.
 
-> **See it in action:** [EXAMPLE_REPORT.md](EXAMPLE_REPORT.md) — a complete
-> security assessment of a deliberately vulnerable Flask application, produced
-> by LASER with Ornith-1.5-35B running on oMLX.
-
 ## Table of contents
 
 - [Prerequisites](#prerequisites)
@@ -27,6 +23,7 @@ tools and models can handle. And it works with local LLMs too! Tested with llama
   - [Phase 2 — Headless execution](#phase-2--headless-execution)
   - [Phase 3 — The security review workflow](#phase-3--the-security-review-workflow)
   - [Phase 4 — Collection and cleanup](#phase-4--collection-and-cleanup)
+- [Persistent review knowledge](#persistent-review-knowledge)
 - [Tool roles](#tool-roles)
 - [Scoped permissions](#scoped-permissions)
 - [Classification system](#classification-system)
@@ -50,9 +47,9 @@ when any of them is missing):**
 
 | Tool | Purpose | Install |
 |------|---------|---------|
-| [graphify](https://github.com/Graphify-Labs/graphify) | Codebase knowledge graph | `uv tool install "graphifyy[openai]"` |
+| [graphify](https://github.com/nicobailey/graphify) | Codebase knowledge graph | `uv tool install "graphifyy[openai]"` |
 | [Semgrep](https://semgrep.dev) | Deterministic SAST, 10k+ rules | `brew install semgrep` |
-| [Serena](https://github.com/oraios/serena) | LSP-powered semantic navigation | `uv tool install -p 3.13 serena-agent` |
+| [Serena](https://github.com/JetBrains/serena) | LSP-powered semantic navigation | `uv tool install -p 3.13 serena-agent` |
 | [TruffleHog](https://github.com/trufflesecurity/trufflehog) | Secret scanning with verification | `brew install trufflehog` |
 | [OSV-Scanner](https://google.github.io/osv-scanner/) | Dependency vulnerability scanning | `brew install osv-scanner` |
 | [syft](https://github.com/anchore/syft) | SBOM generation (CycloneDX) | `brew install syft` |
@@ -88,7 +85,21 @@ uv run sast-review --repo /path/to/any/repo --model galileo/coder-ornith:LATEST
 # Benchmark multiple models sequentially
 uv run sast-review --repo /path/to/any/repo --benchmark \
   --models "galileo/coder-ornith:LATEST,galileo/coder-qwen3-30b:LATEST"
+
+# Optional: keep a shared read-only knowledge MCP daemon running
+# (reviews automatically use a local stdio MCP fallback when it is absent)
+uv run sast-review-knowledge
+
+# Optionally override the repository UUID derived from Git
+uv run sast-review --repo /path/to/any/repo \
+  --repo-id 550e8400-e29b-41d4-a716-446655440000
 ```
+
+Persistent knowledge is enabled by default. LASER derives a clone-stable UUID
+from the sanitized Git origin, falling back to root commits for full local
+repositories. `--repo-id` overrides that identity when repositories intentionally
+need to share or separate knowledge or when a shallow repository has no origin;
+`--no-knowledge` disables retrieval and ingestion.
 
 ---
 
@@ -127,7 +138,7 @@ flowchart TD
     A["Start"] --> B{"graphify<br/>detected?"}
     B -- yes --> C{"graphify-out/<br/>already exists?"}
     B -- no --> F["Skip graphify"]
-    C -- yes --> D["Reuse existing<br/>graph.json"]
+    C -- yes --> D["Incrementally update<br/>graph.json"]
     C -- no --> E["Run graphify<br/>--code-only"]
     E --> D
     D --> F
@@ -150,7 +161,9 @@ run to prepare the whole playground.
 
 When `graphify` is installed and no `graphify-out/graph.json` exists yet, the
 runner invokes `graphify <repo> --code-only` by default. This performs a purely
-structural, AST-based analysis of the codebase — fast and lightweight.
+structural, AST-based analysis of the codebase — fast and lightweight. When a
+graph already exists, the runner invokes `graphify update <repo>` rather than
+trusting it unchanged, so prior reachability context tracks the current worktree.
 
 The output consists of `graphify-out/graph.json` and
 `graphify-out/manifest.json`, which together describe file-to-file import
@@ -334,7 +347,10 @@ execute destructive operations. I could not let this go.
 **Timeout:** By default there is no timeout — the review simply runs until
 completion. One can set a hard limit with `--timeout <seconds>`, in which case
 the process is killed when the limit is reached and whatever partial output
-exists is captured.
+exists is captured. If OpenCode exits successfully with an incomplete fresh
+assessment, the runner resumes the same session once to finish the remaining
+contract steps. A missing or still-incomplete assessment returns exit code 2;
+stale assessment files from earlier runs are never accepted.
 
 **Headroom:** When `headroom` is found on PATH, the runner wraps the command
 as `headroom wrap opencode run ...` to benefit from prompt caching and
@@ -881,6 +897,47 @@ in a contaminated state.
 
 ---
 
+## Persistent review knowledge
+
+Persistent knowledge is enabled by default with a clone-stable repository UUID
+derived from Git; `--repo-id UUID` is an explicit override. LASER stores a typed,
+append-only evidence ledger in SQLite/WAL, refreshes every prior evidence span
+against the current repository, and injects a bounded
+`.security-output/PRIOR_KNOWLEDGE.md` during the review. Only same-repository
+CRITICAL/HIGH findings with explicit per-finding verifier records and exact
+locally recomputed evidence-hash coverage become `verified_active`. Changed or
+missing evidence is marked `stale` and must be reviewed again.
+
+The local service is deliberately split by authority:
+
+- `sast-review` owns writes and gated ingestion.
+- `sast-review-knowledge` exposes read-only Streamable HTTP MCP tools on
+  `http://127.0.0.1:8765/mcp` by default.
+- Same-repository prior context is generated deterministically before OpenCode
+  starts; it does not depend on the model choosing to query MCP.
+- Cross-repository MCP searches return generalized security patterns only and
+  label them `INVESTIGATIVE LEADS — NOT VERDICTS`.
+- Benchmark runs may retrieve knowledge that existed before the benchmark but
+  never ingest model results during the benchmark, preventing cross-model
+  contamination.
+
+Each knowledge-enabled run writes `review-evidence.json` as the canonical
+portable record and an `okf/` Open Knowledge Format v0.2 export for human review,
+Git diffing, and interchange. OKF is a one-way publication view; SQLite and the
+Pydantic evidence bundle remain authoritative because OKF's time-based
+`stale_after` and actor-level `verified` fields cannot replace code-fingerprint
+invalidation or per-finding verification checks.
+
+The default database is
+`~/.local/share/sast-review/knowledge.sqlite3`. It is created with owner-only
+permissions. A long-running daemon binds only to a loopback interface and
+exposes no write tools. When that daemon is absent, the runner starts the same
+read-only service as a local stdio MCP child for the review. If the database,
+Git metadata, or a prior evidence path is unavailable, the review fails closed
+for reuse and continues as a fresh review.
+
+---
+
 ## Tool roles
 
 Each tool in the pipeline contributes a different kind of evidence, and it is
@@ -1034,6 +1091,8 @@ output/
       sbom.cyclonedx.json         # SBOM (if syft ran)
       grype-results.json          # dependency vulns (if grype ran)
       grype-summary.json          # compact grype summary for model
+      review-evidence.json        # typed evidence bundle (unless --no-knowledge)
+      okf/                        # one-way OKF v0.2 export (unless --no-knowledge)
 ```
 
 The `metrics.json` file contains a structured summary of the run:
@@ -1054,12 +1113,17 @@ The `metrics.json` file contains a structured summary of the run:
   "assessment_exists": true,
   "assessment_lines": 412,
   "total_findings": 8,
-  "findings_by_severity": {"CRITICAL": 2, "HIGH": 3, "MODERATE": 2, "LOW": 1},
+  "findings_by_severity": {"CRITICAL": 2, "HIGH": 3, "MEDIUM": 2, "LOW": 1},
   "sections_found": ["Security Assessment", "Scope", "Attack Surface", "..."],
   "sections_missing": [],
   "critic_completed": true,
   "verifier_completed": true,
-  "is_complete": true
+  "is_complete": true,
+  "repository_id": "550e8400-e29b-41d4-a716-446655440000",
+  "knowledge_enabled": true,
+  "knowledge_ingested": true,
+  "prior_active_count": 3,
+  "prior_stale_count": 1
 }
 ```
 
@@ -1104,6 +1168,15 @@ Output:
   --output-dir PATH       Output directory (default: <runner>/output)
   --list-tools            List detected tools and exit
 
+Persistent knowledge:
+  --repo-id UUID          Override the stable repository identity derived from Git
+  --knowledge-db PATH     SQLite ledger path
+  --knowledge-mcp-url URL Loopback Streamable HTTP MCP endpoint
+  --no-knowledge          Disable retrieval, evidence export, and ingestion
+
+Knowledge daemon:
+  sast-review-knowledge [--database PATH] [--host 127.0.0.1] [--port 8765]
+
 Debug:
   -v, --verbose           Enable DEBUG-level logging
 ```
@@ -1119,6 +1192,13 @@ sast-review/
 │   ├── tools.py             # tool detection, MCP config generation
 │   ├── inject.py            # backup/inject/cleanup lifecycle
 │   ├── collect.py           # assessment parsing, validation
+│   ├── fingerprint.py       # Git, source-span, and stable identity hashes
+│   ├── knowledge_models.py  # typed evidence and verification contracts
+│   ├── knowledge_store.py   # authoritative SQLite/WAL + FTS5 ledger
+│   ├── knowledge_collect.py # assessment-to-evidence collection and prior context
+│   ├── knowledge_pipeline.py # pre/post-review knowledge orchestration
+│   ├── knowledge_mcp.py     # read-only local Streamable HTTP MCP daemon
+│   ├── okf_export.py        # one-way Open Knowledge Format v0.2 export
 │   └── monitor.py           # live session monitoring via opencode SQLite DB
 ├── commands/
 │   ├── security-review.md   # command template with checkpoint gates (391 lines)

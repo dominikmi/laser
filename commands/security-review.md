@@ -33,8 +33,9 @@ You are a security engineer performing a structured review. Model name: **$1**
   the results. Every accepted item = one edit. Every dispute = one append.
 - If a subagent returns zero items: write "0 issues raised" in the
   checkpoint line. If a subagent fails or returns no response: write
-  `FAILED — [reason]` in the checkpoint line. Then proceed. Do NOT
-  attempt the subagent's job yourself.
+  `FAILED — [reason]` in the checkpoint line. Exception: an empty verifier
+  response is successful when the required CRITICAL/HIGH coverage set is
+  empty. Then proceed. Do NOT attempt the subagent's job yourself.
 - Do NOT read files speculatively. Read a file only when a step explicitly
   requires it. Do NOT re-read source files you have already read. Exception:
   re-reading the assessment file is allowed when a step requires it (e.g.
@@ -142,6 +143,16 @@ these files before the review started. Check with `ls .security-output/`:
   This narrows the review to changed files and their callers. In steps 5-6,
   prioritize files listed in the diff scope. Still scan other files if
   context allows, but diff-scope files come first.
+- **Prior knowledge** — if `.security-output/PRIOR_KNOWLEDGE.md` exists: read
+  it once. Write `## Prior knowledge baseline` with at most 20 total one-line
+  items under exactly these labels: `Same-repo ACTIVE VERIFIED`, `STALE`, and
+  `Cross-repo patterns — INVESTIGATIVE LEADS NOT VERDICTS`. Preserve the
+  artifact's explicit repository/status distinctions; do not infer ACTIVE or
+  VERIFIED. Same-repo ACTIVE VERIFIED items prioritize corresponding files in
+  step 6. STALE items and cross-repo patterns are leads requiring fresh source
+  evidence. Do not automatically query, fetch, or search for any cross-repo
+  knowledge. Prior knowledge never creates a finding by itself and never
+  bypasses critic or verifier coverage.
 
 If none of these exist: proceed. They are optional.
 
@@ -149,7 +160,7 @@ If none of these exist: proceed. They are optional.
 or neither tool was available — write to the assessment:
 "No automated scanner findings. Full manual review required."
 
-Max tool calls this step: 3 (1 ls + up to 2 reads).
+Max tool calls this step: 4 (1 ls + up to 3 reads).
 
 **Step 4.** Map the attack surface. Write `## Attack surface` with three
 subsections: `### Entry points` table (`# | Type | Location | Auth required
@@ -202,21 +213,22 @@ regardless of scanner results.
 
 Scan files from step 5 in this priority order:
 1. Files in diff scope from step 3c (if `DIFF_SCOPE.md` was present).
-2. Files on attack paths from step 4b (if any).
-3. Files with semgrep findings from step 3b (if any).
-4. Files that import packages flagged by grype from step 3c (if any).
-5. Entry-point files (routes, handlers, CLI parsers, main modules).
-6. Files with high graphify connectivity (many incoming/outgoing edges) —
+2. Files tied to same-repo ACTIVE VERIFIED prior items from step 3c (if any).
+3. Files on attack paths from step 4b (if any).
+4. Files with semgrep findings from step 3b (if any).
+5. Files that import packages flagged by grype from step 3c (if any).
+6. Entry-point files (routes, handlers, CLI parsers, main modules).
+7. Files with high graphify connectivity (many incoming/outgoing edges) —
    these are integration points where data converges.
-7. Infrastructure files (`Dockerfile*`, `docker-compose*.yml`, `compose*.yaml`)
+8. Infrastructure files (`Dockerfile*`, `docker-compose*.yml`, `compose*.yaml`)
    — these define the runtime security posture of the deployed application.
-8. Seed, fixture, and example files (`db_seed*`, `seed*`, `fixtures/*`,
+9. Seed, fixture, and example files (`db_seed*`, `seed*`, `fixtures/*`,
    `.env.example`, `**/initial_data*`) — common sources of hardcoded
    credentials and leaked secrets.
-9. Files containing security-sensitive operations. Grep for these patterns
+10. Files containing security-sensitive operations. Grep for these patterns
    before reading: `password|secret|token|auth|session|crypt|deserializ|
    pickle|yaml\.load|exec|eval|subprocess|os\.system|render|sql|query`.
-10. Remaining files.
+11. Remaining files.
 
 Process files one at a time. For each file: read it, find issues, write
 findings to the assessment, then move to the next file. Do NOT batch-read
@@ -240,21 +252,25 @@ For each file:
 4. If grype flagged a package this file imports (check step 3c baseline):
    verify whether the vulnerable function is called and classify.
 5. Classify each finding on all four axes per the ref file.
-6. Write the finding to the assessment file immediately (using the format
+6. Assign each first-party, container, and dependency finding the next unique
+   run-local `**Finding ID:** F-NNN` in discovery order. Never reuse an ID,
+   including after a finding is removed.
+7. Write the finding to the assessment file immediately (using the format
    from the ref file). For multi-file data flow traces:
    - Use the attack path from step 4b as the skeleton (if one exists).
    - If Serena MCP is available: one `find_referencing_symbols` call per
      finding to verify the sink is called. Max 1 Serena call per finding.
    - If graphify is available and trace spans 3+ files: one `graphify path`
      call to confirm connectivity. No path = DEAD or CONDITIONAL.
-7. For dead-code candidates from step 4b: grep for call sites. Zero call
+8. For dead-code candidates from step 4b: grep for call sites. Zero call
    sites = DEAD. Do NOT run additional graphify queries.
-8. **Dockerfile / docker-compose files**: apply the container security
+9. **Dockerfile / docker-compose files**: apply the container security
    checklist from the ref file instead of the CWE source-code checklist.
-9. Move to next file. Do NOT write analysis between files.
+10. Move to next file. Do NOT write analysis between files.
 
 **Step 7.** Scan dependencies. Use all available sources — they complement
-each other.
+each other. Assign each new dependency finding the next unused run-local
+`**Finding ID:** F-NNN`; continue the sequence from step 6.
 
 - **Grype results** (from step 3c): if `## Dependency scan baseline` was
   written, start from those findings. For each: one grep for imports of the
@@ -271,8 +287,9 @@ each other.
 
 Max 20 import greps total across all sources. Stop.
 
-**Step 8.** Write summary tables (formats in ref file) to assessment file.
-Nothing else.
+**Step 8.** Write summary tables (formats in ref file) to assessment file. Then
+write `## Rejected findings` with `None`; step 12b moves verifier-removed
+findings here for the persistent audit trail. Nothing else.
 
 **Step 9.** Read the assessment file. Check these sections exist: Attack
 surface, Scanned files, Findings (or "No vulnerabilities found"), Findings
@@ -302,7 +319,9 @@ top-to-bottom in one pass:
   A. **Accept** — edit the assessment file NOW. Use the critic's
      classification verbatim. Do NOT rephrase or improve it.
   B. **Dispute** — append to `## Disputed findings`:
-     `Title | Critic says: [X] | I say: [Y] because [file:line evidence]`
+     `F-NNN | Title | Critic says: [X] | I say: [Y] because [file:line evidence]`
+- Every critic item must begin with the affected `F-NNN`. For an accepted
+  missed vulnerability, retain the new unused ID assigned by the critic.
 - Max 3 disputes. Accept all others.
 
 After processing ALL items, append this checkpoint line to the assessment:
@@ -322,28 +341,54 @@ verifier has returned its response.
 
 **Step 12b.** Process verifier response. This is a mandatory step — do NOT skip it.
 
-Read the verifier's response. Count the discrepancies. Then process each
-item top-to-bottom in one pass:
+The required coverage set is the first 15 CRITICAL/HIGH findings in report
+order after step 11b. Parse the verifier response as JSON Lines, one object per
+line. A valid record has exactly these keys in this order: `finding_id`,
+`result`, `checks_performed`, `evidence_locations`, `detail`; `finding_id`
+matches `F-[0-9][0-9][0-9]`, is unique, and is in the required coverage set;
+`result` is `verified`, `corrected`, or `removed`; `checks_performed` is a
+non-empty string array using only `path`, `line`, `snippet`, `trace`, and
+`dependency_version`; `evidence_locations` is a non-empty string array; and
+`detail` is a string.
+Treat malformed, duplicate, out-of-scope, or missing required records as
+unverified. Do not invent or repair a verifier record.
+
+Process valid records top-to-bottom in one pass:
 
 - Do NOT re-read files. Do NOT deliberate. The verifier reports facts.
-- For each discrepancy, do exactly ONE of:
-  A. **Path/line wrong** — replace with the verifier's corrected path/line.
-  B. **Snippet wrong** — replace with the exact code the verifier reported.
-  C. **Trace hop missing** — use the verifier's correction. If verifier says
-     "hop does not exist": delete the finding entirely.
-  D. **Confidence issue** — downgrade: CONFIRMED->PROBABLE, PROBABLE->POSSIBLE,
-     POSSIBLE->delete the finding.
+- `verified` — leave the finding unchanged.
+- `corrected` — apply all actual values in `detail`: replace wrong path/line,
+  snippet, trace, dependency version, or confidence. The finding remains.
+  Evidence that disproves a finding must use `removed`, not `corrected`.
+- `removed` — remove the finding from its active/dead/test/dependency section and
+  its summary-table row, update summary counts, then move the complete original
+  finding block under `## Rejected findings`. Append `**Rejection reason:**`
+  using `detail`. Replace the section's initial `None` on the first removal.
+  Rejected findings are audit evidence, not report findings, and must not remain
+  in totals.
 - Zero disputes with the verifier. These are facts, not opinions.
+- After processing each valid record, append exactly one single-line comment
+  containing that same compact JSON object, with no markdown escaping or
+  added keys: `<!-- verifier-record: {JSON} -->`
 
-After processing ALL items, append this checkpoint line to the assessment:
+The parser contract is literal: the line begins `<!-- verifier-record: `,
+contains one valid compact JSON object, and ends ` -->`. JSON strings must not
+contain `-->`. Append no verifier-record comment for an unverified record.
 
-`<!-- verifier-checkpoint: ITEMS items, CORRECTED corrected, REMOVED removed -->`
+After processing ALL records, append this aggregate checkpoint line:
 
-Replace ITEMS/CORRECTED/REMOVED with actual counts. If the verifier returned
-zero discrepancies: write `<!-- verifier-checkpoint: 0 items, 0 corrected, 0 removed -->`.
-If the verifier failed: write `<!-- verifier-checkpoint: FAILED — [reason] -->`.
+`<!-- verifier-checkpoint: ITEMS items, VERIFIED verified, CORRECTED corrected, REMOVED removed, UNVERIFIED unverified -->`
 
-Do NOT proceed to step 13 until the checkpoint line is written.
+ITEMS is the number of valid covered records. VERIFIED/CORRECTED/REMOVED are
+result counts after processing, and UNVERIFIED is the number of required-
+coverage findings lacking one valid record. If no records are valid, use
+zeros for ITEMS/VERIFIED/CORRECTED/REMOVED
+and the required coverage-set size for UNVERIFIED. If the verifier failed:
+write `<!-- verifier-checkpoint: FAILED — [reason] -->` and treat the full
+required coverage set as unverified in step 13.
+
+Do NOT proceed to step 13 until all per-finding comments and the aggregate
+checkpoint line are written.
 
 **Step 13.** Read back the two checkpoint lines from the assessment file. Use
 their counts to write the `## Validation` section. Append to the assessment:
@@ -352,11 +397,11 @@ their counts to write the `## Validation` section. Append to the assessment:
 ## Validation
 Reviewed by @critic and @verifier on $(date +%Y-%m-%d).
 Critic issues: [ITEMS from critic-checkpoint] raised, [ACCEPTED] accepted, [DISPUTED] disputed.
-Verifier issues: [ITEMS from verifier-checkpoint] found, [CORRECTED] corrected, [REMOVED] findings removed.
+Verifier coverage: [ITEMS from verifier-checkpoint] CRITICAL/HIGH records; [VERIFIED] verified, [CORRECTED] corrected, [REMOVED] removed, [UNVERIFIED] unverified.
 ```
 
 If a checkpoint says FAILED: write `@critic: FAILED — [reason]` or
-`@verifier: FAILED — [reason]` instead of counts.
+`@verifier: FAILED — [reason]; CRITICAL/HIGH verified: 0` instead of counts.
 
 A `## Validation` section that does not reference @critic and @verifier is
 wrong. Do NOT write a self-check. Do NOT list sections. The only content
@@ -374,6 +419,7 @@ Nothing else.
 - Sections: [found]/[expected]
 - Critic: completed|failed
 - Verifier: completed|failed
+- CRITICAL/HIGH verified: X
 ```
 
 Fill in the actual counts from the assessment. Nothing else.

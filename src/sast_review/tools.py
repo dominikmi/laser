@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import logging
 import shutil
+import socket
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +271,64 @@ def build_mcp_config(
             ]
         mcp[tool.name] = config
     return mcp
+
+
+def build_knowledge_mcp_config(
+    url: str,
+    timeout_seconds: float = 0.25,
+    database_path: Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Build a remote MCP entry or a local stdio fallback.
+
+    Args:
+        url: Streamable HTTP MCP endpoint.
+        timeout_seconds: Maximum TCP connection time.
+        database_path: Knowledge database used by the local stdio fallback.
+
+    Returns:
+        A single read-only knowledge MCP entry, or an empty mapping when neither
+        a daemon nor a fallback database is available.
+
+    Raises:
+        ValueError: If the URL is not an HTTP loopback endpoint.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "::1", "localhost"}:
+        raise ValueError("knowledge MCP URL must use HTTP on a loopback host")
+    if parsed.path != "/mcp" or parsed.query or parsed.fragment:
+        raise ValueError("knowledge MCP URL must use the /mcp endpoint")
+    port = parsed.port or 80
+    try:
+        with socket.create_connection((parsed.hostname, port), timeout=timeout_seconds):
+            pass
+    except OSError:
+        if database_path is None:
+            return {}
+        return {
+            "laser-knowledge": {
+                "type": "local",
+                "command": [
+                    sys.executable,
+                    "-m",
+                    "sast_review.knowledge_mcp",
+                    "--database",
+                    str(database_path.expanduser().resolve()),
+                    "--transport",
+                    "stdio",
+                ],
+                "enabled": True,
+                "timeout": 5000,
+            }
+        }
+    return {
+        "laser-knowledge": {
+            "type": "remote",
+            "url": url,
+            "enabled": True,
+            "oauth": False,
+            "timeout": 5000,
+        }
+    }
 
 
 def missing_tool_hints(found: list[DetectedTool]) -> list[str]:

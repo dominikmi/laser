@@ -392,7 +392,7 @@ session.add(RegistrationCode(static_code))
 **Impact:** MODERATE
 **Likelihood:** MEDIUM
 **Confidence:** CONFIRMED
-**Severity:** MODERATE (ACTIVE)
+**Severity:** MEDIUM (ACTIVE)
 
 **Data flow:**
 Source:     `Dockerfile:17` — `CMD service nginx start; uwsgi --ini uwsgi.ini`
@@ -436,7 +436,7 @@ RUN apt-get -y install nginx \
 **Impact:** MODERATE
 **Likelihood:** MEDIUM
 **Confidence:** CONFIRMED
-**Severity:** MODERATE (ACTIVE)
+**Severity:** MEDIUM (ACTIVE)
 
 **Data flow:**
 Source:     `uwsgi.ini:9` — `chmod-sock = 664`
@@ -587,7 +587,7 @@ Security Review Complete
   Exit code:  0
   Assessment: test-vuln-flask/SEC_ASSESSMENT_Ornith_1_5_35B_A3B_MLX_4bit.md
   Lines:      578
-  Findings:   14 (CRITICAL: 2, HIGH: 5, LOW: 4, MODERATE: 3)
+  Findings:   16 (CRITICAL: 2, HIGH: 4, MEDIUM: 4, LOW: 6)
   Sections:   9/9
   Critic:     completed
   Verifier:   completed

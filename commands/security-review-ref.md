@@ -16,6 +16,8 @@ This file is the reference specification for `/security-review`. It is read by
 - Do NOT re-classify DEAD code as ACTIVE without a verified call chain.
 - Do NOT assign Confidence CONFIRMED without file:line at every trace hop.
 - Do NOT write narrative prose in findings. Use the format exactly.
+- Assign each finding one unique, run-local ID in discovery order: `F-001`,
+  `F-002`, and so on. Never reuse an ID, including after removal.
 
 ## Classification system
 
@@ -154,6 +156,7 @@ findings is ACTIVE if the Dockerfile is in the build path.
 
 ```markdown
 ### [FILE]:[LINES] — [TITLE]
+**Finding ID:** F-NNN
 **CWE:** CWE-XXX
 **Reachability:** [exactly one of: ACTIVE | CONDITIONAL | DEAD | TEST-ONLY]
 **Impact:** [exactly one of: CRITICAL | HIGH | MODERATE | LOW]
@@ -185,6 +188,7 @@ infrastructure-as-code files where data-flow tracing does not apply.
 
 ```markdown
 ### [FILE]:[LINES] — [TITLE]
+**Finding ID:** F-NNN
 **CWE:** CWE-XXX
 **Reachability:** ACTIVE (built and deployed) | CONDITIONAL (state condition) | DEAD
 **Impact:** [exactly one of: CRITICAL | HIGH | MODERATE | LOW]
@@ -206,6 +210,7 @@ Use this format exactly. Do not omit fields. Do not add fields.
 
 ```markdown
 ### [PACKAGE]@[VERSION] — [TITLE]
+**Finding ID:** F-NNN
 **CVE:** [CVE-XXXX-XXXXX or "no CVE — advisory only"]
 **CWE:** CWE-XXX
 **Reachability:** [ACTIVE — vulnerable function called at file:line | DEAD — not imported/called]
@@ -236,28 +241,29 @@ sections (with "None" or "No findings") rather than omitting them.
 7. `## Dependency findings` (third-party/supply-chain)
 8. `## Findings summary` (tables below)
 9. `## Disputed findings` (after critic review; "None" if no disputes)
-10. `## Validation` (after subagent review)
-11. `## Run metadata` (model, date, finding counts, critic/verifier status)
+10. `## Rejected findings` (verifier-removed findings retained for knowledge audit; "None" if none)
+11. `## Validation` (after subagent review)
+12. `## Run metadata` (model, date, finding counts, critic/verifier status)
 
 ## Findings summary tables
 
 ### First-party code
 Total findings: X (Active: X, Conditional: X, Dead: X, Test-only: X)
 
-| Severity | Count | Confirmed | Probable | Possible |
-|----------|-------|-----------|----------|----------|
-| CRITICAL | X     | X         | X        | X        |
-| HIGH     | X     | X         | X        | X        |
-| MEDIUM   | X     | X         | X        | X        |
-| LOW      | X     | X         | X        | X        |
+| Severity | Finding IDs | Count | Confirmed | Probable | Possible |
+|----------|-------------|-------|-----------|----------|----------|
+| CRITICAL | F-NNN, ...  | X     | X         | X        | X        |
+| HIGH     | F-NNN, ...  | X     | X         | X        | X        |
+| MEDIUM   | F-NNN, ...  | X     | X         | X        | X        |
+| LOW      | F-NNN, ...  | X     | X         | X        | X        |
 
 ### Dependencies
 Total findings: X (Active: X, Dead: X)
 
-| Package | Version | CVE | Severity | Called? |
-|---------|---------|-----|----------|---------|
+| Finding ID | Package | Version | CVE | Severity | Called? |
+|------------|---------|---------|-----|----------|---------|
 
 ### All findings
 
-| File/Package | Finding | CWE | Reachability | Impact | Likelihood | Severity | Confidence |
-|--------------|---------|-----|--------------|--------|------------|----------|------------|
+| Finding ID | File/Package | Finding | CWE | Reachability | Impact | Likelihood | Severity | Confidence |
+|------------|--------------|---------|-----|--------------|--------|------------|----------|------------|

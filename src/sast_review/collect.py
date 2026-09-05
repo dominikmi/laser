@@ -18,7 +18,7 @@ class Severity(Enum):
 
     CRITICAL = "CRITICAL"
     HIGH = "HIGH"
-    MODERATE = "MODERATE"
+    MEDIUM = "MEDIUM"
     LOW = "LOW"
     UNKNOWN = "UNKNOWN"
 
@@ -109,27 +109,36 @@ REQUIRED_SECTIONS = [
 
 # --- parsing helpers -----------------------------------------------------
 
-_SEVERITY_PATTERN = re.compile(
-    r"\b(CRITICAL|HIGH|MODERATE|MEDIUM|LOW)\b",
+_COMPUTED_SEVERITY_PATTERN = re.compile(
+    r"\*\*Severity:\*\*[^\n=]*=\s*(CRITICAL|HIGH|MEDIUM|LOW)\b",
+    re.IGNORECASE,
+)
+_DIRECT_SEVERITY_PATTERN = re.compile(
+    r"\*\*Severity:\*\*\s*(CRITICAL|HIGH|MEDIUM|LOW)\b",
     re.IGNORECASE,
 )
 
-_CWE_PATTERN = re.compile(r"CWE-\d+")
+_CWE_PATTERN = re.compile(r"CWE-(?:\d+|OTHER)\b", re.IGNORECASE)
 
 _FINDING_HEADER_PATTERN = re.compile(
-    # Match H3 finding headers with file:line or pkg@version locations.
+    # Match H3 finding headers with file:line, pkg@version, or named surfaces.
     # Accepts both [bracketed] and unbracketed location forms.
     # Examples:
     #   ### [routes/account.py:118] — Pickle deserialization
     #   ### routes/account.py:118 — Pickle deserialization
-    #   ### click@8.1.7 — Command injection
-    r"^###\s+\[?([^\]\n]*?(?::\d+|@[\d.]+)[^\]\n]*?)\]?\s*[—\-]+\s*(.+)",
+    #   ### state-changing POST routes — Missing CSRF protection
+    r"^###\s+\[?([^\]\n]+?)\]?\s+[—–-]\s+(.+)$",
     re.MULTILINE,
 )
 
 _SECTION_HEADER_PATTERN = re.compile(
     r"^##\s+(.+)",
     re.MULTILINE,
+)
+
+_REJECTED_SECTION_PATTERN = re.compile(
+    r"^##\s+Rejected findings\s*$.*?(?=^##\s+|\Z)",
+    re.MULTILINE | re.DOTALL | re.IGNORECASE,
 )
 
 
@@ -192,17 +201,19 @@ def _extract_findings(content: str) -> list[Finding]:
         # Look ahead in the next ~500 chars for CWE and severity
         context = content[match.start():match.start() + 500]
         cwe_match = _CWE_PATTERN.search(context)
-        cwe = cwe_match.group(0) if cwe_match else "unknown"
-        sev_match = _SEVERITY_PATTERN.search(context)
+        sev_match = (
+            _COMPUTED_SEVERITY_PATTERN.search(context)
+            or _DIRECT_SEVERITY_PATTERN.search(context)
+        )
+        if cwe_match is None or sev_match is None:
+            continue
+        cwe = cwe_match.group(0)
         severity = Severity.UNKNOWN
-        if sev_match:
-            raw = sev_match.group(1).upper()
-            if raw == "MEDIUM":
-                raw = "MODERATE"
-            try:
-                severity = Severity(raw)
-            except ValueError:
-                pass
+        raw = sev_match.group(1).upper()
+        try:
+            severity = Severity(raw)
+        except ValueError:
+            pass
 
         # Detect reachability
         reachability = Reachability.UNKNOWN
@@ -293,7 +304,8 @@ def parse_assessment(assessment_path: Path) -> AssessmentResult:
     found, missing = _check_section_presence(
         section_headers, REQUIRED_SECTIONS, full_content=content,
     )
-    findings = _extract_findings(content)
+    report_content = _REJECTED_SECTION_PATTERN.sub("", content)
+    findings = _extract_findings(report_content)
 
     return AssessmentResult(
         path=assessment_path,

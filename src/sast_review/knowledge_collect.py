@@ -46,11 +46,10 @@ _FINDING_SECTION = re.compile(
 )
 _RUN_ID = re.compile(r"^F-[0-9]{3}$")
 _FIELD = re.compile(r"(?m)^\*\*(?P<name>[^*]+):\*\*\s*(?P<value>.+?)\s*$")
-_LOCATION = re.compile(
-    r"(?P<path>(?:[^\s:\[\]()>]+/)*"
-    r"(?:Dockerfile[^\s:\[\]()>]*|[^\s:\[\]()>]+\.[A-Za-z0-9_+-]+))"
+_LOCATION_SUFFIX = re.compile(
     r":(?P<start>[1-9][0-9]*)(?:-(?P<end>[1-9][0-9]*))?"
 )
+_LOCATION_BOUNDARIES = frozenset(" \t\r\n:[]()<>")
 _HEADER_LOCATION = re.compile(
     r"^\[?(?P<path>.+?):(?P<start>[1-9][0-9]*)"
     r"(?:-(?P<end>[1-9][0-9]*))?\]?\s+[—-]\s+(?P<title>.+)$"
@@ -243,6 +242,25 @@ def _resolve_evidence(
     )
 
 
+def _parse_locations(value: str) -> Iterator[tuple[str, int, int]]:
+    for suffix in _LOCATION_SUFFIX.finditer(value):
+        path_end = suffix.start()
+        path_start = path_end
+        while path_start > 0 and value[path_start - 1] not in _LOCATION_BOUNDARIES:
+            path_start -= 1
+        path = value[path_start:path_end]
+        filename = path.rsplit("/", 1)[-1]
+        _, separator, extension = filename.rpartition(".")
+        is_file = filename.startswith("Dockerfile") or (
+            bool(separator and extension)
+            and all(character.isalnum() or character in "_+-" for character in extension)
+        )
+        if not path or ":" in path or not is_file:
+            continue
+        start = int(suffix["start"])
+        yield path, start, int(suffix["end"] or start)
+
+
 def _raw_locations(
     kind: FindingKind,
     header_location: tuple[str, int, int] | None,
@@ -261,9 +279,8 @@ def _raw_locations(
     for names, role in labels:
         label = "|".join(re.escape(name) for name in names)
         for line_match in re.finditer(rf"(?mi)^\s*(?:\*\*)?(?:{label}):(?:\*\*)?\s*(.+)$", body):
-            for location in _LOCATION.finditer(line_match.group(1)):
-                start = int(location["start"])
-                locations.append((location["path"], start, int(location["end"] or start), role))
+            for path, start, end in _parse_locations(line_match.group(1)):
+                locations.append((path, start, end, role))
     unique: dict[tuple[str, int, int, EvidenceRole], None] = {}
     for raw_location in locations:
         unique.setdefault(raw_location, None)
@@ -412,9 +429,8 @@ def _required_checks(kind: FindingKind) -> frozenset[VerificationCheck]:
 def _location_tuples(locations: Sequence[str]) -> set[tuple[str, int, int]]:
     parsed: set[tuple[str, int, int]] = set()
     for value in locations:
-        for match in _LOCATION.finditer(value):
-            start = int(match["start"])
-            parsed.add((Path(match["path"]).as_posix(), start, int(match["end"] or start)))
+        for path, start, end in _parse_locations(value):
+            parsed.add((Path(path).as_posix(), start, end))
     return parsed
 
 

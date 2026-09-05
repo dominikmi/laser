@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 from sast_review.fingerprint import normalized_text_hash
 from sast_review.knowledge_collect import (
+    _parse_locations,
     collect_review_evidence,
     load_latest_same_repo_findings,
     parse_assessment_findings,
@@ -123,6 +124,14 @@ class FindingParsingTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_location_parser_handles_files_ranges_and_adversarial_paths(self) -> None:
+        self.assertEqual(
+            list(_parse_locations("src/service.py:1-2 Dockerfile.prod:3")),
+            [("src/service.py", 1, 2), ("Dockerfile.prod", 3, 3)],
+        )
+        adversarial = "!/" * 50_000 + "not-a-file:1"
+        self.assertEqual(list(_parse_locations(adversarial)), [])
 
     def test_parses_first_party_container_and_dependency_blocks(self) -> None:
         assessment = _first_party() + """

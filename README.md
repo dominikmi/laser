@@ -324,21 +324,22 @@ or times out halfway through.
 ```mermaid
 %%{init: {"theme": "dark"}}%%
 flowchart TD
-    A["Build opencode<br/>command"] --> B["subprocess.Popen"]
-    B --> C["Capture JSON events,<br/>stderr + session ID"]
-    C --> D{"Timeout<br/>reached?"}
-    D -- yes --> F["Kill process<br/>capture partial output"]
-    D -- no --> E["Wait for process exit"]
-    E --> G{"Fresh assessment<br/>complete?"}
-    G -- yes --> H["Record successful<br/>result"]
-    G -- no --> S{"Session ID<br/>available?"}
-    S -- yes --> R["Resume same session once<br/>complete remaining steps"]
-    R --> V{"Assessment now<br/>complete?"}
-    V -- yes --> H
-    V -- no --> X["Return exit code 2"]
-    S -- no --> X
-    F --> Y["Return timeout<br/>or process failure"]
-    H --> Z["Proceed to<br/>collection"]
+    A["Initial OpenCode stage<br/>steps 1-10"] --> B{"Fresh core assessment<br/>written?"}
+    B -- no --> X["Return exit code 2"]
+    B -- yes --> C["Resume same session<br/>critic stage only"]
+    C --> D{"Critic checkpoint<br/>written?"}
+    D -- no --> X
+    D -- yes --> E["Resume same session<br/>verifier stage only"]
+    E --> F{"Validation complete?"}
+    F -- no --> X
+    F -- yes --> G["Proceed to collection"]
+
+    M["Session monitor<br/>1-second enforcement"] -. watches .-> A
+    M -. watches .-> C
+    M -. watches .-> E
+    M --> P{"Premature or concurrent<br/>subagents detected?"}
+    P -- yes --> K["Kill current process<br/>record protocol violation"]
+    K --> X
 ```
 
 At this point the runner hands control to OpenCode by executing:
@@ -378,10 +379,12 @@ execute destructive operations. I could not let this go.
 **Timeout:** By default there is no timeout — the review simply runs until
 completion. One can set a hard limit with `--timeout <seconds>`, in which case
 the process is killed when the limit is reached and whatever partial output
-exists is captured. If OpenCode exits successfully with an incomplete fresh
-assessment, the runner resumes the same session once to finish the remaining
-contract steps. A missing or still-incomplete assessment returns exit code 2;
-stale assessment files from earlier runs are never accepted.
+exists is captured. The runner executes the review in three OpenCode stages:
+core assessment, critic, then verifier. Each resumed stage uses the same session,
+and the verifier cannot start until the critic checkpoint exists. The monitor
+kills a stage that launches a subagent before the assessment exists or runs more
+than one subagent concurrently. Missing checkpoints, stale output, or an
+incomplete final assessment return exit code 2.
 
 **Headroom:** When `headroom` is found on PATH, the runner wraps the command
 as `headroom wrap opencode run ...` to benefit from prompt caching and
@@ -391,9 +394,10 @@ compression. This can be disabled with `--no-headroom`.
 
 This is the heart of the system — the work that the LLM actually performs
 during headless execution. The command template defines a strict sequential
-workflow: no steps may be skipped, no steps may be reordered, and the
-sub-agent delegation at the end is enforced through checkpoint gates that
-the model must write before it can proceed. Without such harness, some models "decided" that they didn't need to follow the steps and delegate stuff to sub-agents.
+workflow split into three runner-controlled invocations. The initial invocation
+must stop after Step 10; the runner then resumes the same session for one critic
+stage and, only after its checkpoint, one verifier stage. No stage may schedule
+both subagents, skip its checkpoint, or continue into the next stage.
 
 ```mermaid
 %%{init: {"theme": "dark"}}%%
@@ -411,10 +415,13 @@ flowchart TD
     S7 --> S8["Step 8<br/>Write summary tables"]
     S8 --> S9["Step 9<br/>Self-check: verify<br/>all sections exist"]
     S9 --> S10["Step 10<br/>Confirm file saved"]
-    S10 --> S10b["Step 10b<br/>Unload primary model<br/>free GPU for subagents"]
-    S10b --> S11["Step 11<br/>Invoke @critic"]
+    S10 --> R1["STOP<br/>return to runner"]
+    R1 -. "resume same session" .-> S10bC["Step 10b<br/>Unload primary model"]
+    S10bC --> S11["Step 11<br/>Invoke @critic only"]
     S11 --> S11b["Step 11b<br/>Process critic feedback<br/>write checkpoint"]
-    S11b --> S12["Step 12<br/>Invoke @verifier"]
+    S11b --> R2["STOP<br/>return to runner"]
+    R2 -. "resume after checkpoint" .-> S10bV["Step 10b<br/>Unload primary model"]
+    S10bV --> S12["Step 12<br/>Invoke @verifier only"]
     S12 --> S12b["Step 12b<br/>Process verifier feedback<br/>write checkpoint"]
     S12b --> S13["Step 13<br/>Write validation section<br/>from checkpoint data"]
     S13 --> S13b["Step 13b<br/>Write run metadata"]
@@ -737,18 +744,17 @@ written at this point, even if they would be empty.
 
 #### Step 10 — Confirm save
 
-A simple but important step: the model confirms the file is saved before
-proceeding to subagent delegation. This prevents the critic and verifier from
-reading an incomplete or partially flushed file.
+The model confirms the file is saved, stops, and returns control to the runner.
+No subagent is allowed during this initial invocation. The runner validates the
+fresh core assessment before resuming the same session for the critic stage.
 
 #### Step 10b — Free GPU memory for subagents
 
-The model runs `bash .security-output/omlx-unload.sh` to unload the primary
-model from GPU memory before subagent delegation begins. This is necessary
-because the critic and verifier typically run on different models, and on
-local inference setups the GPU may not have enough memory to hold two models
-simultaneously — the oMLX memory guard would reject the subagent's model
-load.
+At the start of each resumed subagent stage, the model runs
+`bash .security-output/omlx-unload.sh` to unload the primary model. The critic
+and verifier execute in separate OpenCode invocations because local inference
+setups may not have enough memory to hold their different models simultaneously.
+The monitor also rejects any stage that starts more than one subagent.
 
 The script is injected during Phase 1 only when the primary model uses the
 oMLX provider. For other providers (Galileo, LM Studio, remote APIs), the
@@ -788,11 +794,10 @@ self-verify." This constraint exists because we observed that models, when
 given the choice, will invariably confirm their own findings rather than
 genuinely challenge them. 
 
-**Exactly once:** The model invokes `@critic` exactly once and `@verifier`
-exactly once — two subagent calls in total. Additional rounds are prohibited.
-In early experimental runs, the model launched four subagent calls (two extra
-verifier passes), which consumed approximately sixteen minutes of additional
-GPU time without meaningfully improving the assessment. It just decided on that by itself.
+**Exactly once and sequentially:** The runner gives the primary model one
+invocation for `@critic` and a later invocation for `@verifier`. The verifier
+stage is not started until the critic checkpoint exists. Additional, premature,
+or concurrent subagent calls are protocol violations and terminate the stage.
 
 #### Step 11b — Process critic feedback
 

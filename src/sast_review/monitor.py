@@ -18,6 +18,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -128,6 +129,7 @@ class _SessionState:
     # Primary session model info for pre-emptive unloading
     primary_provider: str = ""
     primary_model: str = ""
+    protocol_violation: str = ""
 
 
 def _find_latest_session(
@@ -219,6 +221,21 @@ def _get_subagent_tasks(
     return tasks
 
 
+def _subagent_protocol_violation(
+    tasks: list[dict[str, str]],
+    assessment_bytes: int,
+    allowed_subagents: int | None,
+) -> str:
+    running_tasks = [task for task in tasks if task["status"] == "running"]
+    if running_tasks and assessment_bytes == 0:
+        return "subagent started before a non-empty assessment existed"
+    if allowed_subagents == 0 and running_tasks:
+        return "subagent started during the primary assessment stage"
+    if allowed_subagents is not None and len(running_tasks) > allowed_subagents:
+        return "multiple subagents started concurrently"
+    return ""
+
+
 def _get_latest_errors(
     conn: sqlite3.Connection, session_id: str, limit: int = 3,
 ) -> list[str]:
@@ -263,6 +280,9 @@ def _poll_loop(
     stop_event: threading.Event,
     start_ts: int,
     db_path: Path,
+    poll_interval: float,
+    allowed_subagents: int | None,
+    violation_handler: Callable[[], None] | None,
 ) -> None:
     """Main polling loop — runs in a background thread."""
     # Resolve oMLX endpoint once at startup for model unloading
@@ -273,7 +293,7 @@ def _poll_loop(
 
     poll_count = 0
     while not stop_event.is_set():
-        stop_event.wait(_POLL_INTERVAL)
+        stop_event.wait(poll_interval)
         if stop_event.is_set():
             break
         poll_count += 1
@@ -333,7 +353,18 @@ def _poll_loop(
                     )
 
             # Subagent tasks
+            assess_bytes, assess_lines = _check_assessment(assessment_path)
             tasks = _get_subagent_tasks(conn, sid)
+            violation = _subagent_protocol_violation(
+                tasks,
+                assess_bytes,
+                allowed_subagents,
+            )
+            if violation and not state.protocol_violation:
+                state.protocol_violation = violation
+                logger.error("Monitor: review protocol violation: %s", violation)
+                if violation_handler is not None:
+                    violation_handler()
             for task in tasks:
                 task_id = task.get("session_id", "")
                 prev_status = state.subagent_statuses.get(task_id, "")
@@ -454,10 +485,16 @@ class SessionMonitor:
         assessment_path: Path,
         db_path: Path = _OPENCODE_DB,
         poll_interval: float = _POLL_INTERVAL,
+        allowed_subagents: int | None = None,
+        violation_handler: Callable[[], None] | None = None,
+        session_id: str = "",
     ) -> None:
         self._assessment_path = assessment_path
         self._db_path = db_path
         self._poll_interval = poll_interval
+        self._allowed_subagents = allowed_subagents
+        self._violation_handler = violation_handler
+        self._initial_session_id = session_id
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._state = _SessionState()
@@ -475,7 +512,7 @@ class SessionMonitor:
         # Record start time in milliseconds (opencode uses ms timestamps)
         self._start_ts = int(time.time() * 1000)
         self._stop_event.clear()
-        self._state = _SessionState()
+        self._state = _SessionState(session_id=self._initial_session_id)
 
         self._thread = threading.Thread(
             target=_poll_loop,
@@ -485,6 +522,9 @@ class SessionMonitor:
                 self._stop_event,
                 self._start_ts,
                 self._db_path,
+                self._poll_interval,
+                self._allowed_subagents,
+                self._violation_handler,
             ),
             daemon=True,
             name="session-monitor",
@@ -523,3 +563,8 @@ class SessionMonitor:
     def session_id(self) -> str:
         """The discovered session ID, if any."""
         return self._state.session_id
+
+    @property
+    def protocol_violation(self) -> str:
+        """The first enforced review-protocol violation, if any."""
+        return self._state.protocol_violation

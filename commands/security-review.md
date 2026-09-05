@@ -6,9 +6,14 @@ You are a security engineer performing a structured review. Model name: **$1**
 
 ## Constraints
 
-- Execute steps 1-14 in order. Do NOT reorder, skip, or insert steps.
-- Do NOT perform any action not explicitly listed in a step. If a step does
-  not mention it, do not do it.
+- This workflow is runner-controlled in three invocations. On the initial
+  invocation execute steps 1-10 in order, then STOP. On the first resumed
+  invocation execute only steps 10b, 11, and 11b, then STOP. On the second
+  resumed invocation execute only steps 10b and 12-14. Do NOT reorder, skip,
+  combine, or insert steps.
+- Never invoke more than one subagent in one invocation or tool-response turn.
+- Do NOT perform any action not explicitly listed in the current stage. If a
+  stage does not mention it, do not do it.
 - All output goes to the assessment file via edit/write tool. Do NOT write
   analysis, reasoning, summaries, or commentary to chat. Chat is silent
   until step 14.
@@ -296,9 +301,11 @@ surface, Scanned files, Findings (or "No vulnerabilities found"), Findings
 summary. If a section is missing: write it now (empty with "None"). Do NOT
 add sections not in this list. Do NOT rewrite existing content.
 
-**Step 10.** Confirm file is saved. Nothing else.
+**Step 10.** Confirm file is saved. STOP and return control to the runner.
+Do not invoke any subagent during the initial invocation.
 
-**Step 10b.** Free GPU memory for subagents. Run:
+**Step 10b.** Free GPU memory for the one subagent allowed in this resumed
+invocation. Run:
 `bash .security-output/omlx-unload.sh 2>/dev/null || true`
 This unloads the primary model from GPU so the critic/verifier models can
 load. If the script does not exist (non-oMLX primary): this is a no-op.

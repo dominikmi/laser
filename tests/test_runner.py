@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sast_review import _execute_with_completion_repair, execute_review
+from sast_review import _execute_staged_review, execute_review
+from sast_review.monitor import _subagent_protocol_violation
 
 _INCOMPLETE_ASSESSMENT = """# Security Assessment — test
 ## Context
@@ -26,6 +27,31 @@ Reviewed by @critic and @verifier with substantive independent results.
 """
 
 
+class ProtocolEnforcementTests(unittest.TestCase):
+    """Verify premature and concurrent subagents are rejected."""
+
+    def test_subagent_before_assessment_is_rejected(self) -> None:
+        tasks = [{"status": "running"}]
+        self.assertEqual(
+            _subagent_protocol_violation(tasks, 0, 1),
+            "subagent started before a non-empty assessment existed",
+        )
+
+    def test_subagent_during_primary_stage_is_rejected(self) -> None:
+        tasks = [{"status": "running"}]
+        self.assertEqual(
+            _subagent_protocol_violation(tasks, 100, 0),
+            "subagent started during the primary assessment stage",
+        )
+
+    def test_concurrent_subagents_are_rejected(self) -> None:
+        tasks = [{"status": "running"}, {"status": "running"}]
+        self.assertEqual(
+            _subagent_protocol_violation(tasks, 100, 1),
+            "multiple subagents started concurrently",
+        )
+
+
 class SessionRecoveryTests(unittest.TestCase):
     """Verify OpenCode DB discovery backs up missing JSON session events."""
 
@@ -36,6 +62,7 @@ class SessionRecoveryTests(unittest.TestCase):
     ) -> None:
         monitor = monitor_type.return_value
         monitor.session_id = "session-from-db"
+        monitor.protocol_violation = ""
         process = popen.return_value
         process.communicate.return_value = "", ""
         process.returncode = 0
@@ -50,11 +77,11 @@ class SessionRecoveryTests(unittest.TestCase):
         self.assertIn('"sessionID": "session-from-db"', result[2])
 
 
-class CompletionRepairTests(unittest.TestCase):
-    """Verify incomplete runs resume once and cannot report success prematurely."""
+class StagedReviewTests(unittest.TestCase):
+    """Verify the runner serializes critic and verifier execution."""
 
     @patch("sast_review.execute_review")
-    def test_incomplete_assessment_resumes_existing_session(self, execute: object) -> None:
+    def test_critic_finishes_before_verifier_starts(self, execute: object) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
             output = repository / ".security-output"
@@ -62,14 +89,20 @@ class CompletionRepairTests(unittest.TestCase):
             assessment = output / "SEC_ASSESSMENT_test.md"
 
             def run(*args: object, **kwargs: object) -> tuple[float, int, str, str, bool]:
-                if kwargs.get("session_id") is None:
+                prompt = kwargs.get("resume_prompt")
+                if prompt is None:
                     assessment.write_text(_INCOMPLETE_ASSESSMENT)
-                    return 1.0, 0, '{"sessionID":"session-1"}\n', "", False
-                assessment.write_text(_INCOMPLETE_ASSESSMENT + _VALIDATION)
-                return 2.0, 0, '{"sessionID":"session-1"}\n', "", False
+                elif "Step 11" in prompt:
+                    assessment.write_text(
+                        _INCOMPLETE_ASSESSMENT
+                        + "<!-- critic-checkpoint: 0 items, 0 accepted, 0 disputed -->\n"
+                    )
+                else:
+                    assessment.write_text(_INCOMPLETE_ASSESSMENT + _VALIDATION)
+                return 1.0, 0, '{"sessionID":"session-1"}\n', "", False
 
             execute.side_effect = run
-            result = _execute_with_completion_repair(
+            result = _execute_staged_review(
                 repository,
                 "provider/model",
                 "test",
@@ -80,8 +113,12 @@ class CompletionRepairTests(unittest.TestCase):
 
         self.assertEqual(result[0], 3.0)
         self.assertEqual(result[1], 0)
-        self.assertEqual(execute.call_count, 2)
-        self.assertEqual(execute.call_args.kwargs["session_id"], "session-1")
+        self.assertEqual(execute.call_count, 3)
+        critic_call, verifier_call = execute.call_args_list[1:]
+        self.assertIn("Step 11", critic_call.kwargs["resume_prompt"])
+        self.assertNotIn("Step 12", critic_call.kwargs["resume_prompt"])
+        self.assertIn("Step 12", verifier_call.kwargs["resume_prompt"])
+        self.assertNotIn("Step 11", verifier_call.kwargs["resume_prompt"])
 
     @patch("sast_review.execute_review")
     def test_unchanged_stale_assessment_returns_failure(self, execute: object) -> None:
@@ -93,7 +130,7 @@ class CompletionRepairTests(unittest.TestCase):
             assessment.write_text(_INCOMPLETE_ASSESSMENT + _VALIDATION)
             execute.return_value = 1.0, 0, '{"sessionID":"session-1"}\n', "", False
 
-            result = _execute_with_completion_repair(
+            result = _execute_staged_review(
                 repository,
                 "provider/model",
                 "test",
@@ -106,7 +143,7 @@ class CompletionRepairTests(unittest.TestCase):
         self.assertEqual(execute.call_count, 1)
 
     @patch("sast_review.execute_review")
-    def test_incomplete_assessment_after_repair_returns_failure(self, execute: object) -> None:
+    def test_missing_critic_checkpoint_stops_before_verifier(self, execute: object) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
             output = repository / ".security-output"
@@ -118,7 +155,7 @@ class CompletionRepairTests(unittest.TestCase):
                 return 1.0, 0, '{"sessionID":"session-1"}\n', "", False
 
             execute.side_effect = run
-            result = _execute_with_completion_repair(
+            result = _execute_staged_review(
                 repository,
                 "provider/model",
                 "test",

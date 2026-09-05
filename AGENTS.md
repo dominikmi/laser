@@ -60,11 +60,13 @@ uv run sast-review --repo /path/to/any/repo --repo-id <stable-uuid>
 5. Derive a stable Git repository ID (or use `--repo-id`) and render bounded prior knowledge
 6. Inject .opencode/ commands, permissions, MCP configs, and prior context
    - `$FILE_CAP` placeholder replaced with dynamic cap based on model context window
-7. Execute `opencode run --command security-review --auto --format json`
-8. Resume the same OpenCode session once if its fresh assessment is incomplete
-9. Collect assessment, scanner artifacts, typed evidence bundle, OKF export, and metrics
-10. Gate SQLite ingestion on assessment completeness and per-finding verifier evidence
-11. Restore target repo from backups
+7. Execute `opencode run --command security-review --auto --format json` through Step 10
+8. Resume the same session for the critic stage; require its checkpoint before continuing
+9. Resume the same session for the verifier and finalization stage
+10. Reject premature or concurrent subagents and incomplete final assessments
+11. Collect assessment, scanner artifacts, typed evidence bundle, OKF export, and metrics
+12. Gate SQLite ingestion on assessment completeness and per-finding verifier evidence
+13. Restore target repo from backups
 
 ## Scoped permissions
 

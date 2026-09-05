@@ -212,6 +212,7 @@ def execute_review(
     use_headroom: bool = True,
     runtime_env: Mapping[str, str] | None = None,
     session_id: str | None = None,
+    resume_prompt: str | None = None,
 ) -> tuple[float, int, str, str, bool]:
     """Run the security review headlessly via opencode.
 
@@ -226,7 +227,8 @@ def execute_review(
         timeout_seconds: max seconds before killing. 0 = no timeout.
         use_headroom: if True, invoke via 'headroom wrap opencode'.
         runtime_env: additional in-memory environment values for the child only.
-        session_id: existing OpenCode session to resume for completion repair.
+        session_id: existing OpenCode session to resume.
+        resume_prompt: stage-specific prompt sent to the existing session.
 
     Returns:
         Tuple of (wall_seconds, exit_code, stdout, stderr, timed_out).
@@ -256,14 +258,7 @@ def execute_review(
             "--format", "json",
             "--print-logs",
             "--dir", str(target_repo),
-            (
-                "Resume the existing security-review workflow without repeating analysis or "
-                "invoking subagents again. Read the current assessment and complete only the "
-                "unfinished mandated steps using the @critic and @verifier results already in "
-                "this session: process their outputs, append all required per-finding records "
-                "and aggregate checkpoints, then append ## Validation and ## Run metadata. "
-                "Finish only after the assessment satisfies the injected review contract."
-            ),
+            resume_prompt or "Resume the existing security-review workflow.",
         ])
 
     logger.info("Executing: %s", " ".join(cmd))
@@ -281,7 +276,19 @@ def execute_review(
 
     # Start live session monitor
     assessment_path = target_repo / ".security-output" / f"SEC_ASSESSMENT_{label}.md"
-    monitor = SessionMonitor(assessment_path)
+    process_holder: list[subprocess.Popen[str]] = []
+
+    def stop_on_protocol_violation() -> None:
+        if process_holder and process_holder[0].poll() is None:
+            process_holder[0].kill()
+
+    monitor = SessionMonitor(
+        assessment_path,
+        poll_interval=1.0,
+        allowed_subagents=0 if session_id is None else 1,
+        violation_handler=stop_on_protocol_violation,
+        session_id=session_id or "",
+    )
     monitor.start()
 
     proc = subprocess.Popen(
@@ -291,6 +298,7 @@ def execute_review(
         text=True,
         env=env,
     )
+    process_holder.append(proc)
     try:
         stdout, stderr = proc.communicate(timeout=effective_timeout)
     except subprocess.TimeoutExpired:
@@ -306,6 +314,9 @@ def execute_review(
 
     wall = time.monotonic() - t_start
     exit_code = proc.returncode or 0
+    if monitor.protocol_violation:
+        exit_code = 2
+        stderr += f"\nReview protocol violation: {monitor.protocol_violation}\n"
     logger.info(
         "Review completed: exit=%d, time=%.1fs, timed_out=%s",
         exit_code, wall, timed_out,
@@ -313,7 +324,20 @@ def execute_review(
     return wall, exit_code, stdout, stderr, timed_out
 
 
-def _execute_with_completion_repair(
+def _combined_execution(
+    results: list[tuple[float, int, str, str, bool]],
+    exit_code: int | None = None,
+) -> tuple[float, int, str, str, bool]:
+    return (
+        sum(result[0] for result in results),
+        results[-1][1] if exit_code is None else exit_code,
+        "".join(result[2] for result in results),
+        "".join(result[3] for result in results),
+        any(result[4] for result in results),
+    )
+
+
+def _execute_staged_review(
     target_repo: Path,
     model: str,
     label: str,
@@ -327,7 +351,7 @@ def _execute_with_completion_repair(
         if assessment_path.exists()
         else None
     )
-    result = execute_review(
+    initial = execute_review(
         target_repo,
         model,
         label,
@@ -335,25 +359,31 @@ def _execute_with_completion_repair(
         use_headroom,
         runtime_env=runtime_env,
     )
-    wall, exit_code, stdout, stderr, timed_out = result
-    if exit_code != 0 or timed_out or not assessment_path.exists():
-        return result
+    results = [initial]
+    if initial[1] != 0 or initial[4] or not assessment_path.exists():
+        return initial
     current_state = (assessment_path.stat().st_mtime_ns, assessment_path.stat().st_size)
-    assessment = parse_assessment(assessment_path)
     if current_state == original_state:
         logger.error("Review did not produce a fresh assessment")
-        return wall, 2, stdout, stderr, timed_out
+        return _combined_execution(results, exit_code=2)
+    assessment = parse_assessment(assessment_path)
+    blocking_sections = [
+        section for section in assessment.sections_missing if section != "Validation"
+    ]
+    if blocking_sections:
+        logger.error(
+            "Review stopped before subagent stages; assessment missing: %s",
+            ", ".join(blocking_sections),
+        )
+        return _combined_execution(results, exit_code=2)
     if assessment.is_complete:
-        return result
-    session_id = _session_id_from_events(stdout)
+        return initial
+    session_id = _session_id_from_events(initial[2])
     if session_id is None:
         logger.error("Assessment is incomplete and the OpenCode session ID is unavailable")
-        return wall, 2, stdout, stderr, timed_out
-    logger.warning(
-        "Assessment is incomplete (%s); resuming session once to finish the contract",
-        ", ".join(assessment.sections_missing) or "validation checkpoints",
-    )
-    repair = execute_review(
+        return _combined_execution(results, exit_code=2)
+
+    critic = execute_review(
         target_repo,
         model,
         label,
@@ -361,20 +391,42 @@ def _execute_with_completion_repair(
         use_headroom,
         runtime_env=runtime_env,
         session_id=session_id,
+        resume_prompt=(
+            "Continue the injected security-review command. Perform only Step 10b, Step 11, "
+            "and Step 11b. Invoke exactly the one subagent required by Step 11, wait for its "
+            "response, process it into the assessment, append the critic-checkpoint, then stop."
+        ),
     )
-    repair_wall, repair_exit, repair_stdout, repair_stderr, repair_timed_out = repair
-    final_assessment = parse_assessment(assessment_path)
-    final_exit = repair_exit
-    if final_exit == 0 and not repair_timed_out and not final_assessment.is_complete:
-        logger.error("Assessment remains incomplete after one completion repair")
-        final_exit = 2
-    return (
-        wall + repair_wall,
-        final_exit,
-        stdout + repair_stdout,
-        stderr + repair_stderr,
-        timed_out or repair_timed_out,
+    results.append(critic)
+    if critic[1] != 0 or critic[4]:
+        return _combined_execution(results)
+    content = assessment_path.read_text(encoding="utf-8")
+    if re.search(r"<!--\s*critic-checkpoint:\s*.+?-->", content) is None:
+        logger.error("Critic stage completed without a critic checkpoint")
+        return _combined_execution(results, exit_code=2)
+
+    verifier = execute_review(
+        target_repo,
+        model,
+        label,
+        timeout_seconds,
+        use_headroom,
+        runtime_env=runtime_env,
+        session_id=session_id,
+        resume_prompt=(
+            "Continue the injected security-review command. Perform only Step 10b, Step 12, "
+            "Step 12b, Step 13, Step 13b, and Step 14. Invoke exactly the one subagent required "
+            "by Step 12, wait for its response, process all verifier records and checkpoints, "
+            "write Validation and Run metadata, report the final summary, then stop."
+        ),
     )
+    results.append(verifier)
+    if verifier[1] != 0 or verifier[4]:
+        return _combined_execution(results)
+    if not parse_assessment(assessment_path).is_complete:
+        logger.error("Verifier stage completed without a complete assessment")
+        return _combined_execution(results, exit_code=2)
+    return _combined_execution(results)
 
 
 def run_single(
@@ -569,7 +621,7 @@ def run_single(
         if any(t.name == "graphify" for t in detected_tools):
             inject_graphify_plugin(_RUNNER_DIR, target_repo, manifest)
 
-        wall, exit_code, stdout, stderr, timed_out = _execute_with_completion_repair(
+        wall, exit_code, stdout, stderr, timed_out = _execute_staged_review(
             target_repo,
             model,
             label,
@@ -590,7 +642,7 @@ def run_single(
                 else None
             ),
         ):
-            wall, exit_code, stdout, stderr, timed_out = _execute_with_completion_repair(
+            wall, exit_code, stdout, stderr, timed_out = _execute_staged_review(
                 target_repo,
                 model,
                 label,

@@ -16,11 +16,15 @@ import json
 import logging
 import shutil
 import subprocess
+import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 
 from sast_review.tools import DetectedTool
 
@@ -37,6 +41,24 @@ _FILE_CAP_TIERS: list[tuple[int, int]] = [
     (65_536, 30),    # 65k context (default)
 ]
 _DEFAULT_FILE_CAP = 30
+DEFAULT_SBOM_TIMEOUT = 600
+_DEFAULT_SYFT_EXCLUSIONS = (
+    "./.git/**",
+    "./.venv/**",
+    "./venv/**",
+    "./env/**",
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "**/.mypy_cache/**",
+    "**/.ruff_cache/**",
+    "**/node_modules/**",
+    "./.security-output/**",
+    "./graphify-out/**",
+    "./output/**",
+    "./build/**",
+    "./dist/**",
+)
+_REPOSITORY_SYFT_CONFIGS = (Path(".syft.yaml"), Path(".syft/config.yaml"))
 
 
 def compute_file_cap(model: str) -> int:
@@ -434,10 +456,61 @@ def run_graphify_preprocess(
     return False
 
 
+def _validate_syft_exclusion(pattern: object) -> str:
+    if not isinstance(pattern, str):
+        raise TypeError("Syft exclude entries must be strings")
+    value = pattern.strip()
+    parts = value.replace("\\", "/").split("/")
+    if (
+        not value
+        or "\x00" in value
+        or value.startswith(("/", "\\", "~"))
+        or len(value) > 1
+        and value[1] == ":"
+        or ".." in parts
+    ):
+        raise ValueError(f"unsafe Syft exclude pattern: {pattern!r}")
+    if not value.startswith(("./", "*/", "**/")):
+        raise ValueError("Syft exclude patterns must start with './', '*/', or '**/'")
+    return value
+
+
+def _load_syft_exclusions(target_repo: Path) -> tuple[tuple[str, ...], Path | None]:
+    root = target_repo.resolve(strict=True)
+    config_path = next(
+        (root / relative for relative in _REPOSITORY_SYFT_CONFIGS if (root / relative).exists()),
+        None,
+    )
+    repository_exclusions: list[str] = []
+    if config_path is not None:
+        _reject_symlink(config_path)
+        resolved_config = config_path.resolve(strict=True)
+        if not resolved_config.is_relative_to(root) or not resolved_config.is_file():
+            raise ValueError("Syft configuration must be a repository file")
+        yaml = YAML(typ="safe", pure=True)
+        try:
+            config = yaml.load(resolved_config.read_text(encoding="utf-8"))
+        except YAMLError as exc:
+            raise ValueError(f"invalid Syft configuration: {exc}") from exc
+        if config is None:
+            config = {}
+        if not isinstance(config, dict):
+            raise ValueError("Syft configuration must be a mapping")
+        raw_exclusions = config.get("exclude", [])
+        if not isinstance(raw_exclusions, list):
+            raise ValueError("Syft configuration exclude must be a list")
+        repository_exclusions = [
+            _validate_syft_exclusion(pattern) for pattern in raw_exclusions
+        ]
+    exclusions = tuple(dict.fromkeys((*_DEFAULT_SYFT_EXCLUSIONS, *repository_exclusions)))
+    return exclusions, config_path
+
+
 def run_sbom_preprocess(
     target_repo: Path,
     syft_binary: Path | None = None,
     grype_binary: Path | None = None,
+    timeout_seconds: int = DEFAULT_SBOM_TIMEOUT,
 ) -> tuple[Path | None, Path | None]:
     """Generate SBOM with syft and scan it with grype.
 
@@ -449,11 +522,20 @@ def run_sbom_preprocess(
         target_repo: path to the repository.
         syft_binary: resolved syft binary (auto-detected if None).
         grype_binary: resolved grype binary (auto-detected if None).
+        timeout_seconds: positive timeout applied independently to Syft and Grype.
 
     Returns:
         Tuple of (sbom_path, grype_results_path). Either may be None
         if the corresponding tool failed or wasn't available.
     """
+    if isinstance(timeout_seconds, bool) or timeout_seconds < 1:
+        raise ValueError("SBOM preprocessing timeout must be a positive integer")
+    try:
+        syft_exclusions, syft_config = _load_syft_exclusions(target_repo)
+    except (OSError, UnicodeError, TypeError, ValueError) as exc:
+        logger.warning("Syft configuration rejected: %s", exc)
+        return None, None
+
     security_out = target_repo / ".security-output"
     _ensure_safe_directory(target_repo, security_out)
 
@@ -468,21 +550,46 @@ def run_sbom_preprocess(
 
     sbom_path = security_out / "sbom.cyclonedx.json"
     _reject_symlink(sbom_path)
-    logger.info("Running syft SBOM generation on %s", target_repo.name)
+    syft_command = [
+        syft_bin,
+        f"dir:{target_repo}",
+        "-o",
+        f"cyclonedx-json={sbom_path}",
+    ]
+    for exclusion in syft_exclusions:
+        syft_command.extend(("--exclude", exclusion))
+    logger.info(
+        "Running syft SBOM generation on %s (timeout=%ds, config=%s, exclusions=%s)",
+        target_repo.name,
+        timeout_seconds,
+        syft_config or "none",
+        ", ".join(syft_exclusions),
+    )
+    started_at = time.monotonic()
     try:
         result = subprocess.run(
-            [syft_bin, f"dir:{target_repo}", "-o", f"cyclonedx-json={sbom_path}"],
+            syft_command,
+            cwd=target_repo,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout_seconds,
             check=False,
         )
+        elapsed = time.monotonic() - started_at
         if result.returncode == 0:
-            logger.info("SBOM generated: %s", sbom_path)
+            logger.info("SBOM generated in %.1fs: %s", elapsed, sbom_path)
         else:
-            logger.warning("syft exited %d: %s", result.returncode, result.stderr[:300])
+            logger.warning(
+                "syft exited %d after %.1fs: %s",
+                result.returncode,
+                elapsed,
+                result.stderr[:300],
+            )
             sbom_path = None
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+    except subprocess.TimeoutExpired:
+        logger.warning("syft timed out after %ds", timeout_seconds)
+        sbom_path = None
+    except (FileNotFoundError, OSError) as exc:
         logger.warning("syft failed: %s", exc)
         sbom_path = None
 
@@ -497,13 +604,18 @@ def run_sbom_preprocess(
 
     grype_path = security_out / "grype-results.json"
     _reject_symlink(grype_path)
-    logger.info("Running grype vulnerability scan against SBOM")
+    logger.info(
+        "Running grype vulnerability scan against SBOM (timeout=%ds)",
+        timeout_seconds,
+    )
+    started_at = time.monotonic()
     try:
         result = subprocess.run(
             [grype_bin, f"sbom:{sbom_path}", "-o", "json"],
+            cwd=target_repo,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout_seconds,
             check=False,
         )
         if result.returncode in (0, 1):
@@ -512,12 +624,22 @@ def run_sbom_preprocess(
             _write_grype_summary(grype_path)
             vuln_count = _count_grype_vulns(result.stdout)
             logger.info(
-                "Grype scan complete: %d vulnerabilities found", vuln_count,
+                "Grype scan complete in %.1fs: %d vulnerabilities found",
+                time.monotonic() - started_at,
+                vuln_count,
             )
         else:
-            logger.warning("grype exited %d: %s", result.returncode, result.stderr[:300])
+            logger.warning(
+                "grype exited %d after %.1fs: %s",
+                result.returncode,
+                time.monotonic() - started_at,
+                result.stderr[:300],
+            )
             grype_path = None
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+    except subprocess.TimeoutExpired:
+        logger.warning("grype timed out after %ds", timeout_seconds)
+        grype_path = None
+    except (FileNotFoundError, OSError) as exc:
         logger.warning("grype failed: %s", exc)
         grype_path = None
 

@@ -217,6 +217,20 @@ them. The SBOM is additionally collected as a persistent artifact alongside the
 final assessment, which satisfies SBOM compliance requirements without any
 extra effort.
 
+Syft and Grype each have a separate 600-second default preprocessing timeout,
+configurable with `--sbom-timeout SECONDS`. This is independent of the OpenCode
+`--timeout`. LASER excludes common generated/runtime trees from Syft scans:
+`.git`, `.venv`, `venv`, `env`, `__pycache__`, `node_modules`, test/type/lint
+caches, `.security-output`, `graphify-out`, `output`, `build`, and `dist`.
+It retains source files and dependency manifests/lockfiles. For project-specific
+exclusions, put an `exclude:` list in the reviewed repository's `.syft.yaml`
+(or `.syft/config.yaml` when `.syft.yaml` is absent); use Syft-compatible
+globs starting with `./`, `*/`, or `**/` (for example, `./data/**`). LASER merges
+the list with its built-in exclusions without interpreting `.gitignore`. Syft loads the
+repository's other configuration fields normally. LASER logs the effective
+exclusions and elapsed scan times so SBOM scope is auditable. If Syft fails or
+times out, Grype is skipped and the review continues without those artifacts.
+
 Now, let's briefly talk about the relationship between these tools and OSV-Scanner:
 OSV-Scanner operates during the review itself as an MCP tool that the model
 calls interactively, while Syft and Grype run beforehand as a pre-processing
@@ -1252,7 +1266,8 @@ Benchmark:
   --models M1,M2,...      Comma-separated model list (overrides defaults)
 
 Execution:
-  --timeout SECONDS       Per-run timeout (default: 0 = no timeout)
+  --timeout SECONDS       Per-OpenCode-stage timeout (default: 0 = no timeout)
+  --sbom-timeout SECONDS  Per-tool Syft/Grype timeout (default: 600)
   --no-headroom           Bypass headroom wrapper
   --no-graphify           Skip graphify pre-processing
   --graphify-full         Full LLM extraction instead of --code-only

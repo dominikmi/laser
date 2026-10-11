@@ -48,13 +48,14 @@ uv run sast-review --repo /path/to/any/repo --model galileo/coder-ornith:LATEST
 uv run sast-review --repo /path/to/any/repo --benchmark
 uv run sast-review-knowledge
 uv run sast-review --repo /path/to/any/repo --repo-id <stable-uuid>
+uv run sast-review --repo /path/to/any/repo --sbom-timeout 600
 ```
 
 ## How it works
 
 1. Detect installed tools (graphify, semgrep, serena, trufflehog, osv-scanner, syft, grype)
 2. Run graphify --code-only, or incrementally update an existing graph (if available)
-3. Run syft SBOM generation + grype vulnerability scan + grype summary (if available)
+3. Run syft SBOM generation + grype vulnerability scan + grype summary (if available); each uses `--sbom-timeout` (default 600 seconds), with LASER runtime-tree exclusions merged with the target repo's `.syft.yaml` exclusions
 3b. Run trufflehog secret scan (if available)
 4. Compute diff scope if `--diff` supplied (changed files + upstream callers)
 5. Derive a stable Git repository ID (or use `--repo-id`) and render bounded prior knowledge

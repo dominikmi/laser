@@ -25,6 +25,7 @@ from uuid import UUID
 from sast_review.collect import AssessmentResult, parse_assessment
 from sast_review.fingerprint import derive_repository_id
 from sast_review.inject import (
+    DEFAULT_SBOM_TIMEOUT,
     InjectionManifest,
     compute_callers,
     compute_diff_scope,
@@ -435,6 +436,7 @@ def run_single(
     label: str | None = None,
     output_dir: Path | None = None,
     timeout: int = DEFAULT_TIMEOUT,
+    sbom_timeout: int = DEFAULT_SBOM_TIMEOUT,
     use_headroom: bool = True,
     run_graphify: bool = True,
     graphify_full: bool = False,
@@ -466,7 +468,8 @@ def run_single(
         model: provider/model for the primary agent.
         label: label for the assessment file (derived from model if None).
         output_dir: base output directory (default: <runner>/output).
-        timeout: seconds before killing the review.
+        timeout: seconds before killing each OpenCode stage.
+        sbom_timeout: positive timeout applied independently to Syft and Grype.
         use_headroom: wrap opencode in headroom for cache/compression.
         run_graphify: run graphify pre-processing if available.
         graphify_full: use full LLM extraction (slower, richer).
@@ -529,6 +532,7 @@ def run_single(
             target_repo,
             syft_binary=syft_tool.binary,
             grype_binary=grype_tool.binary if grype_tool else None,
+            timeout_seconds=sbom_timeout,
         )
 
     # Phase 2b: secret scanning with trufflehog
@@ -841,6 +845,7 @@ def run_benchmark(
     models: list[str],
     output_dir: Path | None = None,
     timeout: int = DEFAULT_TIMEOUT,
+    sbom_timeout: int = DEFAULT_SBOM_TIMEOUT,
     use_headroom: bool = True,
     run_graphify: bool = True,
     graphify_full: bool = False,
@@ -857,7 +862,8 @@ def run_benchmark(
         target_repo: path to the repo to review.
         models: list of provider/model identifiers to benchmark.
         output_dir: base output directory.
-        timeout: per-run timeout in seconds.
+        timeout: per-stage OpenCode timeout in seconds.
+        sbom_timeout: positive timeout applied independently to Syft and Grype.
         use_headroom: use headroom wrapping.
         run_graphify: run graphify pre-processing (once, before first run).
         graphify_full: use full graphify mode.
@@ -911,6 +917,7 @@ def run_benchmark(
             label=label,
             output_dir=output_dir,
             timeout=timeout,
+            sbom_timeout=sbom_timeout,
             use_headroom=use_headroom,
             run_graphify=False,  # already ran above
             detected_tools=detected_tools,
@@ -1056,6 +1063,17 @@ def _print_result(result: RunResult) -> None:
     print(f"\n{_format_summary(result)}")
 
 
+def _positive_seconds(value: str) -> int:
+    """Parse a strictly positive CLI timeout value."""
+    try:
+        seconds = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be a positive integer") from exc
+    if seconds < 1:
+        raise argparse.ArgumentTypeError("timeout must be a positive integer")
+    return seconds
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -1096,6 +1114,13 @@ def main() -> None:
         type=int,
         default=DEFAULT_TIMEOUT,
         help="Per-run timeout in seconds (default: 0 = no timeout)",
+    )
+    parser.add_argument(
+        "--sbom-timeout",
+        type=_positive_seconds,
+        default=DEFAULT_SBOM_TIMEOUT,
+        metavar="SECONDS",
+        help="Per-tool Syft/Grype timeout in seconds (default: 600)",
     )
     parser.add_argument(
         "--no-headroom",
@@ -1244,6 +1269,7 @@ def main() -> None:
             models=models,
             output_dir=args.output_dir,
             timeout=args.timeout,
+            sbom_timeout=args.sbom_timeout,
             use_headroom=not args.no_headroom,
             run_graphify=not args.no_graphify,
             graphify_full=args.graphify_full,
@@ -1262,6 +1288,7 @@ def main() -> None:
             label=args.label,
             output_dir=args.output_dir,
             timeout=args.timeout,
+            sbom_timeout=args.sbom_timeout,
             use_headroom=not args.no_headroom,
             run_graphify=not args.no_graphify,
             graphify_full=args.graphify_full,

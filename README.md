@@ -400,9 +400,14 @@ kills a stage that launches a subagent before the assessment exists or runs more
 than one subagent concurrently. Missing checkpoints, stale output, or an
 incomplete final assessment return exit code 2.
 
-**Headroom:** When `headroom` is found on PATH, the runner wraps the command
-as `headroom wrap opencode run ...` to benefit from prompt caching and
-compression. This can be disabled with `--no-headroom`.
+**Headroom:** When `headroom` is found on PATH, the runner wraps each OpenCode
+stage as `headroom wrap opencode run ...` to benefit from prompt caching and
+compression. The wrapper is scoped to the review process, and LASER passes the
+effective primary, critic, and verifier provider base URLs through
+`HEADROOM_ALLOWED_BASE_URLS` so private OpenAI-compatible endpoints are not
+redirected to a public provider. Additional operator-approved upstreams may be
+listed in `~/.headroom/.env`; they are merged only for the temporary review
+process. This can be disabled with `--no-headroom`.
 
 ### Phase 3 — The security review workflow
 

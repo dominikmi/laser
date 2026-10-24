@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import UUID
 
 from sast_review.collect import AssessmentResult, parse_assessment
@@ -68,6 +69,7 @@ DEFAULT_TIMEOUT = 0  # 0 = no timeout (run until completion)
 
 # Global opencode config path (provider definitions live here)
 _OPENCODE_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
+_HEADROOM_ENV = Path.home() / ".headroom" / ".env"
 _SESSION_ID_PATTERN = re.compile(r'"sessionID"\s*:\s*"([^"]+)"')
 
 
@@ -163,6 +165,89 @@ class RunResult:
             findings = str(self.assessment.total_findings)
         minutes = self.wall_seconds / 60
         return f"  [{status}] {self.label:<30} {minutes:5.1f}m  findings={findings}"
+
+
+def _configured_agent_model(agent_name: str) -> str | None:
+    """Return the configured OpenCode agent model, if present."""
+    if not _OPENCODE_CONFIG.exists():
+        return None
+    try:
+        cfg = json.loads(_OPENCODE_CONFIG.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.debug("Failed to read opencode agent config: %s", exc)
+        return None
+    agents = cfg.get("agent", {})
+    if not isinstance(agents, dict):
+        return None
+    agent = agents.get(agent_name, {})
+    if not isinstance(agent, dict):
+        return None
+    model = agent.get("model")
+    return model if isinstance(model, str) and model else None
+
+
+def _upstream_origin(url: str) -> str:
+    """Normalize an upstream URL to the origin used by Headroom's allowlist."""
+    parsed = urlparse(url.strip())
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return url.strip()
+
+
+def _headroom_env_urls() -> set[str]:
+    """Read operator allowlisted upstreams from ~/.headroom/.env."""
+    try:
+        lines = _HEADROOM_ENV.read_text().splitlines()
+    except OSError:
+        return set()
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, value = stripped.split("=", 1)
+        name = name.strip().removeprefix("export ").strip()
+        if name != "HEADROOM_ALLOWED_BASE_URLS":
+            continue
+        value = value.strip()
+        if len(value) > 1 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        return {entry.strip() for entry in value.split(",") if entry.strip()}
+    return set()
+
+
+def _review_runtime_env(
+    model: str,
+    llm_api_key: str,
+    critic_model: str | None,
+    verifier_model: str | None,
+) -> dict[str, str]:
+    """Build per-review environment for OpenCode and temporary Headroom."""
+    env = {}
+    if model.startswith("omlx/"):
+        env["SAST_REVIEW_OMLX_API_KEY"] = llm_api_key
+
+    selected_models = (
+        model,
+        critic_model or _configured_agent_model("critic"),
+        verifier_model or _configured_agent_model("verifier"),
+    )
+    base_urls = {
+        _upstream_origin(_resolve_provider(selected)[0])
+        for selected in selected_models
+        if selected
+    }
+    configured_urls = {
+        _upstream_origin(entry) for entry in _headroom_env_urls()
+    }
+    configured_urls.update(
+        _upstream_origin(entry)
+        for entry in os.environ.get("HEADROOM_ALLOWED_BASE_URLS", "").split(",")
+        if entry.strip()
+    )
+    allowed_urls = configured_urls | base_urls
+    if allowed_urls:
+        env["HEADROOM_ALLOWED_BASE_URLS"] = ",".join(sorted(allowed_urls))
+    return env
 
 
 def _derive_label(model: str) -> str:
@@ -585,10 +670,11 @@ def run_single(
 
     # Phase 5: inject and execute
     review_started_at_ns = time.time_ns()
-    review_runtime_env = (
-        {"SAST_REVIEW_OMLX_API_KEY": llm_api_key}
-        if model.startswith("omlx/")
-        else None
+    review_runtime_env = _review_runtime_env(
+        model,
+        llm_api_key,
+        critic_model,
+        verifier_model,
     )
     if keep_injected:
         # No cleanup — inject manually

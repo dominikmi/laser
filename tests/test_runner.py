@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sast_review import _execute_staged_review, execute_review
+from sast_review import _execute_staged_review, _review_runtime_env, execute_review
 from sast_review.monitor import _subagent_protocol_violation
 
 _INCOMPLETE_ASSESSMENT = """# Security Assessment — test
@@ -75,6 +77,96 @@ class SessionRecoveryTests(unittest.TestCase):
             )
         self.assertEqual(result[1], 0)
         self.assertIn('"sessionID": "session-from-db"', result[2])
+
+
+class ReviewRuntimeEnvTests(unittest.TestCase):
+    """Verify temporary Headroom receives the configured private upstreams."""
+
+    def test_headroom_allowlist_includes_effective_review_models(self) -> None:
+        config = {
+            "provider": {
+                "galileo": {
+                    "options": {"baseURL": "http://galileo.internal:8080/v1"}
+                },
+                "local": {"options": {"baseURL": "http://local.internal:9000/v1"}},
+            },
+            "agent": {
+                "critic": {"model": "local/critic-model"},
+                "verifier": {"model": "galileo/verifier-model"},
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = Path(temporary) / "opencode.json"
+            config_path.write_text(json.dumps(config))
+            env_path = Path(temporary) / ".env"
+            env_path.write_text(
+                'export HEADROOM_ALLOWED_BASE_URLS="https://dotenv.example"\n'
+            )
+            with (
+                patch("sast_review._OPENCODE_CONFIG", config_path),
+                patch("sast_review._HEADROOM_ENV", env_path),
+                patch.dict(
+                    os.environ,
+                    {"HEADROOM_ALLOWED_BASE_URLS": "https://custom.example"},
+                ),
+            ):
+                env = _review_runtime_env(
+                    "galileo/primary-model",
+                    "sk-noauth",
+                    critic_model=None,
+                    verifier_model=None,
+                )
+
+        allowed_urls = set(env["HEADROOM_ALLOWED_BASE_URLS"].split(","))
+        self.assertEqual(
+            allowed_urls,
+            {
+                "http://galileo.internal:8080",
+                "http://local.internal:9000",
+                "https://custom.example",
+                "https://dotenv.example",
+            },
+        )
+
+    def test_headroom_allowlist_uses_critic_override(self) -> None:
+        config = {
+            "provider": {
+                "galileo": {
+                    "options": {"baseURL": "http://galileo.internal:8080/v1"}
+                },
+                "local": {"options": {"baseURL": "http://local.internal:9000/v1"}},
+                "other": {"options": {"baseURL": "http://other.internal:7000/v1"}},
+            },
+            "agent": {
+                "critic": {"model": "local/default-critic"},
+                "verifier": {"model": "galileo/verifier-model"},
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = Path(temporary) / "opencode.json"
+            config_path.write_text(json.dumps(config))
+            with (
+                patch("sast_review._OPENCODE_CONFIG", config_path),
+                patch(
+                    "sast_review._HEADROOM_ENV",
+                    Path(temporary) / "missing.env",
+                ),
+            ):
+                env = _review_runtime_env(
+                    "galileo/primary-model",
+                    "sk-noauth",
+                    critic_model="other/override-critic",
+                    verifier_model=None,
+                )
+
+        allowed_urls = set(env["HEADROOM_ALLOWED_BASE_URLS"].split(","))
+        self.assertEqual(
+            allowed_urls,
+            {
+                "http://galileo.internal:8080",
+                "http://other.internal:7000",
+            },
+        )
 
 
 class StagedReviewTests(unittest.TestCase):
